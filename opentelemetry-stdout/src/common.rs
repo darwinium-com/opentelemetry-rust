@@ -12,17 +12,6 @@ use serde::{Serialize, Serializer};
 #[derive(Debug, Serialize, Clone, Hash, Eq, PartialEq)]
 pub(crate) struct AttributeSet(pub BTreeMap<Key, Value>);
 
-impl From<&opentelemetry_sdk::AttributeSet> for AttributeSet {
-    fn from(value: &opentelemetry_sdk::AttributeSet) -> Self {
-        AttributeSet(
-            value
-                .iter()
-                .map(|(key, value)| (Key::from(key.clone()), Value::from(value.clone())))
-                .collect(),
-        )
-    }
-}
-
 impl From<&opentelemetry_sdk::Resource> for AttributeSet {
     fn from(value: &opentelemetry_sdk::Resource) -> Self {
         AttributeSet(
@@ -77,7 +66,7 @@ impl From<opentelemetry::Key> for Key {
 }
 
 #[derive(Debug, Serialize, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::enum_variant_names)] // we want to emphasize the *Values are collection
 pub(crate) enum Value {
     #[serde(rename = "boolValue")]
     Bool(bool),
@@ -97,9 +86,21 @@ pub(crate) enum Value {
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        match (&self, &other) {
+        match (self, other) {
+            (Value::Bool(b), Value::Bool(ob)) => b.eq(ob),
+            (Value::Int(i), Value::Int(oi)) => i.eq(oi),
             (Value::Double(f), Value::Double(of)) => OrderedFloat(*f).eq(&OrderedFloat(*of)),
-            (non_double, other_non_double) => non_double.eq(other_non_double),
+            (Value::String(s), Value::String(os)) => s.eq(os),
+            (Value::Array(a), Value::Array(oa)) => a.eq(oa),
+            (Value::KeyValues(kv), Value::KeyValues(okv)) => kv.eq(okv),
+            (Value::BytesValue(b), Value::BytesValue(ob)) => b.eq(ob),
+            (Value::Bool(_), _) => false,
+            (Value::Int(_), _) => false,
+            (Value::Double(_), _) => false,
+            (Value::String(_), _) => false,
+            (Value::Array(_), _) => false,
+            (Value::KeyValues(_), _) => false,
+            (Value::BytesValue(_), _) => false,
         }
     }
 }
@@ -167,7 +168,7 @@ impl From<opentelemetry::logs::AnyValue> for Value {
                     })
                     .collect(),
             ),
-            opentelemetry::logs::AnyValue::Bytes(b) => Value::BytesValue(b),
+            opentelemetry::logs::AnyValue::Bytes(b) => Value::BytesValue(*b),
         }
     }
 }
@@ -234,7 +235,7 @@ impl From<opentelemetry_sdk::Scope> for Scope {
         Scope {
             name: value.name,
             version: value.version,
-            attributes: Vec::new(),
+            attributes: value.attributes.into_iter().map(Into::into).collect(),
             dropped_attributes_count: 0,
         }
     }

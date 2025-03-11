@@ -2,9 +2,8 @@ use opentelemetry::{
     trace::{
         Link, SamplingDecision, SamplingResult, SpanKind, TraceContextExt, TraceId, TraceState,
     },
-    Context, Key, OrderMap, Value,
+    Context, KeyValue,
 };
-use std::convert::TryInto;
 
 #[cfg(feature = "jaeger_remote_sampler")]
 mod jaeger_remote;
@@ -78,7 +77,7 @@ pub trait ShouldSample: CloneShouldSample + Send + Sync + std::fmt::Debug {
         trace_id: TraceId,
         name: &str,
         span_kind: &SpanKind,
-        attributes: &OrderMap<Key, Value>,
+        attributes: &[KeyValue],
         links: &[Link],
     ) -> SamplingResult;
 }
@@ -156,7 +155,7 @@ impl Sampler {
     where
         C: HttpClient + 'static,
         Sampler: ShouldSample,
-        R: crate::runtime::RuntimeChannel<crate::trace::BatchMessage>,
+        R: crate::runtime::RuntimeChannel,
         Svc: Into<String>,
     {
         JaegerRemoteSamplerBuilder::new(runtime, http_client, default_sampler, service_name)
@@ -170,7 +169,7 @@ impl ShouldSample for Sampler {
         trace_id: TraceId,
         name: &str,
         span_kind: &SpanKind,
-        attributes: &OrderMap<Key, Value>,
+        attributes: &[KeyValue],
         links: &[Link],
     ) -> SamplingResult {
         let decision = match self {
@@ -250,8 +249,7 @@ pub(crate) fn sample_based_on_probability(prob: &f64, trace_id: TraceId) -> Samp
 mod tests {
     use super::*;
     use crate::testing::trace::TestSpan;
-    use crate::trace::{Sampler, ShouldSample};
-    use opentelemetry::trace::{SamplingDecision, SpanContext, SpanId, TraceFlags, TraceState};
+    use opentelemetry::trace::{SpanContext, SpanId, TraceFlags};
     use rand::Rng;
 
     #[rustfmt::skip]
@@ -333,7 +331,7 @@ mod tests {
                         trace_id,
                         name,
                         &SpanKind::Internal,
-                        &Default::default(),
+                        &[],
                         &[],
                     )
                     .decision
@@ -377,7 +375,7 @@ mod tests {
             TraceId::from_u128(1),
             "should sample",
             &SpanKind::Internal,
-            &Default::default(),
+            &[],
             &[],
         );
 
@@ -386,7 +384,7 @@ mod tests {
             TraceId::from_u128(1),
             "should sample",
             &SpanKind::Internal,
-            &Default::default(),
+            &[],
             &[],
         );
 
@@ -436,7 +434,7 @@ mod tests {
                 TraceId::from_u128(1),
                 name,
                 &SpanKind::Internal,
-                &Default::default(),
+                &[],
                 &[],
             );
 

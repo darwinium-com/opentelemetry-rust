@@ -2,8 +2,56 @@
 
 ## vNext
 
+- Bump MSRV to 1.70 [#2179](https://github.com/open-telemetry/opentelemetry-rust/pull/2179)
+
+## v0.26.0
+Released 2024-Sep-30
+
 ### Changed
 
+- Starting with this version, this crate will use Weaver for the generation of
+  the semantic conventions.
+- **Breaking** Introduced a new feature `semconv_experimental` to enable experimental semantic conventions.
+  This feature is disabled by default.
+
+## v0.25.0
+### Changed
+
+- Starting with this version, this crate will align with `opentelemetry` crate
+  on major,minor versions.
+- Update to [v1.27.0](https://github.com/open-telemetry/semantic-conventions/releases/tag/v1.27.0) of the semantic conventions.
+  [#2000](https://github.com/open-telemetry/opentelemetry-rust/pull/2000)
+
+## v0.16.0
+### Changed
+
+- **Breaking** Moved duplicated (and unrelated) attributes from `opentelemetry_semantic_conventions::trace` and `opentelemetry_semantic_conventions::resource` into `opentelemetry_semantic_conventions::attribute` (which now contains all semantic attributes). `trace` and `resource` now only contain references to attributes which fall under their respective category.
+
+### Added
+
+- Created `opentelemetry_semantic_conventions::metric` to store metric semantic conventions.
+
+## v0.15.0
+
+### Changed
+
+- Update to [v1.24.0](https://github.com/open-telemetry/semantic-conventions/releases/tag/v1.24.0) of the semantic conventions.
+  [#1596](https://github.com/open-telemetry/opentelemetry-rust/pull/1596)
+- Update to [v1.25.0](https://github.com/open-telemetry/semantic-conventions/releases/tag/v1.25.0) of the semantic conventions.
+  [#1681](https://github.com/open-telemetry/opentelemetry-rust/pull/1681)
+
+## v0.14.0
+
+### Changed
+
+- **Breaking** Replaced Key constants with &'static str for tracing compatibility
+  [#1334](https://github.com/open-telemetry/opentelemetry-rust/pull/1334)
+
+## v0.13.0
+
+### Changed
+
+- Bump MSRV to 1.65 [#1318](https://github.com/open-telemetry/opentelemetry-rust/pull/1318)
 - Bump MSRV to 1.64 [#1203](https://github.com/open-telemetry/opentelemetry-rust/pull/1203)
 
 ## v0.12.0

@@ -1,16 +1,16 @@
 //! # No-op OpenTelemetry Metrics Implementation
 //!
-//! This implementation is returned as the global Meter if no `Meter`
-//! has been set. It is also useful for testing purposes as it is intended
-//! to have minimal resource utilization and runtime impact.
+//! This implementation is returned as the global Meter if no `MeterProvider`
+//! has been set. It is expected to have minimal resource utilization and
+//! runtime impact.
 use crate::{
     metrics::{
-        AsyncInstrument, CallbackRegistration, InstrumentProvider, Meter, MeterProvider, Observer,
-        Result, SyncCounter, SyncHistogram, SyncUpDownCounter,
+        AsyncInstrument, InstrumentProvider, Meter, MeterProvider, SyncCounter, SyncGauge,
+        SyncHistogram, SyncUpDownCounter,
     },
     KeyValue,
 };
-use std::{any::Any, borrow::Cow, sync::Arc};
+use std::{any::Any, sync::Arc};
 
 /// A no-op instance of a `MetricProvider`
 #[derive(Debug, Default)]
@@ -28,56 +28,29 @@ impl NoopMeterProvider {
 impl MeterProvider for NoopMeterProvider {
     fn versioned_meter(
         &self,
-        _name: impl Into<Cow<'static, str>>,
-        _version: Option<impl Into<Cow<'static, str>>>,
-        _schema_url: Option<impl Into<Cow<'static, str>>>,
+        _name: &'static str,
+        _version: Option<&'static str>,
+        _schema_url: Option<&'static str>,
         _attributes: Option<Vec<KeyValue>>,
     ) -> Meter {
-        Meter::new(Arc::new(NoopMeterCore::new()))
+        Meter::new(Arc::new(NoopMeter::new()))
     }
 }
 
 /// A no-op instance of a `Meter`
 #[derive(Debug, Default)]
-pub struct NoopMeterCore {
+pub struct NoopMeter {
     _private: (),
 }
 
-impl NoopMeterCore {
+impl NoopMeter {
     /// Create a new no-op meter core.
     pub fn new() -> Self {
-        NoopMeterCore { _private: () }
+        NoopMeter { _private: () }
     }
 }
 
-impl InstrumentProvider for NoopMeterCore {
-    fn register_callback(
-        &self,
-        _instruments: &[Arc<dyn Any>],
-        _callback: Box<dyn Fn(&dyn Observer) + Send + Sync>,
-    ) -> Result<Box<dyn CallbackRegistration>> {
-        Ok(Box::new(NoopRegistration::new()))
-    }
-}
-
-/// A no-op instance of a callback [CallbackRegistration].
-#[derive(Debug, Default)]
-pub struct NoopRegistration {
-    _private: (),
-}
-
-impl NoopRegistration {
-    /// Create a new no-op registration.
-    pub fn new() -> Self {
-        NoopRegistration { _private: () }
-    }
-}
-
-impl CallbackRegistration for NoopRegistration {
-    fn unregister(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
+impl InstrumentProvider for NoopMeter {}
 
 /// A no-op sync instrument
 #[derive(Debug, Default)]
@@ -105,6 +78,12 @@ impl<T> SyncUpDownCounter<T> for NoopSyncInstrument {
 }
 
 impl<T> SyncHistogram<T> for NoopSyncInstrument {
+    fn record(&self, _value: T, _attributes: &[KeyValue]) {
+        // Ignored
+    }
+}
+
+impl<T> SyncGauge<T> for NoopSyncInstrument {
     fn record(&self, _value: T, _attributes: &[KeyValue]) {
         // Ignored
     }

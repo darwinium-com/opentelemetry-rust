@@ -1,18 +1,20 @@
-use opentelemetry::metrics::Unit;
+use opentelemetry::global;
 use opentelemetry::Key;
-use opentelemetry::{metrics::MeterProvider as _, KeyValue};
-use opentelemetry_sdk::metrics::{Aggregation, Instrument, MeterProvider, PeriodicReader, Stream};
+use opentelemetry::KeyValue;
+use opentelemetry_sdk::metrics::{
+    Aggregation, Instrument, PeriodicReader, SdkMeterProvider, Stream,
+};
 use opentelemetry_sdk::{runtime, Resource};
 use std::error::Error;
 
-fn init_meter_provider() -> MeterProvider {
+fn init_meter_provider() -> opentelemetry_sdk::metrics::SdkMeterProvider {
     // for example 1
     let my_view_rename_and_unit = |i: &Instrument| {
         if i.name == "my_histogram" {
             Some(
                 Stream::new()
                     .name("my_histogram_renamed")
-                    .unit(Unit::new("milliseconds")),
+                    .unit("milliseconds"),
             )
         } else {
             None
@@ -42,28 +44,26 @@ fn init_meter_provider() -> MeterProvider {
         }
     };
 
-    let exporter = opentelemetry_stdout::MetricsExporterBuilder::default()
-        // uncomment the below lines to pretty print output.
-        // .with_encoder(|writer, data|
-        //   Ok(serde_json::to_writer_pretty(writer, &data).unwrap()))
-        .build();
+    let exporter = opentelemetry_stdout::MetricsExporterBuilder::default().build();
     let reader = PeriodicReader::builder(exporter, runtime::Tokio).build();
-    MeterProvider::builder()
+    let provider = SdkMeterProvider::builder()
         .with_reader(reader)
-        .with_resource(Resource::new(vec![KeyValue::new(
+        .with_resource(Resource::new([KeyValue::new(
             "service.name",
             "metrics-advanced-example",
         )]))
         .with_view(my_view_rename_and_unit)
         .with_view(my_view_drop_attributes)
         .with_view(my_view_change_aggregation)
-        .build()
+        .build();
+    global::set_meter_provider(provider.clone());
+    provider
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     let meter_provider = init_meter_provider();
-    let meter = meter_provider.meter("mylibraryname");
+    let meter = global::meter("mylibraryname");
 
     // Example 1 - Rename metric using View.
     // This instrument will be renamed to "my_histogram_renamed",
@@ -71,20 +71,19 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     // using view.
     let histogram = meter
         .f64_histogram("my_histogram")
-        .with_unit(Unit::new("ms"))
+        .with_unit("ms")
         .with_description("My histogram example description")
         .init();
 
     // Record measurements using the histogram instrument.
     histogram.record(
         10.5,
-        [
+        &[
             KeyValue::new("mykey1", "myvalue1"),
             KeyValue::new("mykey2", "myvalue2"),
             KeyValue::new("mykey3", "myvalue3"),
             KeyValue::new("mykey4", "myvalue4"),
-        ]
-        .as_ref(),
+        ],
     );
 
     // Example 2 - Drop unwanted attributes using view.
@@ -96,13 +95,12 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     // attribute.
     counter.add(
         10,
-        [
+        &[
             KeyValue::new("mykey1", "myvalue1"),
             KeyValue::new("mykey2", "myvalue2"),
             KeyValue::new("mykey3", "myvalue3"),
             KeyValue::new("mykey4", "myvalue4"),
-        ]
-        .as_ref(),
+        ],
     );
 
     // Example 3 - Change Aggregation configuration using View.
@@ -111,7 +109,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     // use a custom set of boundaries, and min/max values will not be recorded.
     let histogram2 = meter
         .f64_histogram("my_second_histogram")
-        .with_unit(Unit::new("ms"))
+        .with_unit("ms")
         .with_description("My histogram example description")
         .init();
 
@@ -120,35 +118,32 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     // the change of boundaries.
     histogram2.record(
         1.5,
-        [
+        &[
             KeyValue::new("mykey1", "myvalue1"),
             KeyValue::new("mykey2", "myvalue2"),
             KeyValue::new("mykey3", "myvalue3"),
             KeyValue::new("mykey4", "myvalue4"),
-        ]
-        .as_ref(),
+        ],
     );
 
     histogram2.record(
         1.2,
-        [
+        &[
             KeyValue::new("mykey1", "myvalue1"),
             KeyValue::new("mykey2", "myvalue2"),
             KeyValue::new("mykey3", "myvalue3"),
             KeyValue::new("mykey4", "myvalue4"),
-        ]
-        .as_ref(),
+        ],
     );
 
     histogram2.record(
         1.23,
-        [
+        &[
             KeyValue::new("mykey1", "myvalue1"),
             KeyValue::new("mykey2", "myvalue2"),
             KeyValue::new("mykey3", "myvalue3"),
             KeyValue::new("mykey4", "myvalue4"),
-        ]
-        .as_ref(),
+        ],
     );
 
     // Metrics are exported by default every 30 seconds when using stdout exporter,

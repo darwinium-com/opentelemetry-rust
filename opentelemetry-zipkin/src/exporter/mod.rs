@@ -12,17 +12,11 @@ use opentelemetry_sdk::{
     export::{trace, ExportError},
     resource::{ResourceDetector, SdkProvidedResourceDetector},
     runtime::RuntimeChannel,
-    trace::{BatchMessage, Config, Tracer, TracerProvider},
+    trace::{Config, Tracer, TracerProvider},
     Resource,
 };
 use opentelemetry_semantic_conventions as semcov;
 use std::borrow::Cow;
-#[cfg(all(
-    not(feature = "reqwest-client"),
-    not(feature = "reqwest-blocking-client"),
-    feature = "surf-client"
-))]
-use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,11 +63,7 @@ impl Default for ZipkinPipelineBuilder {
                     .build()
                     .unwrap_or_else(|_| reqwest::blocking::Client::new()),
             )),
-            #[cfg(all(
-                not(feature = "reqwest-blocking-client"),
-                not(feature = "surf-client"),
-                feature = "reqwest-client"
-            ))]
+            #[cfg(all(not(feature = "reqwest-blocking-client"), feature = "reqwest-client"))]
             client: Some(Arc::new(
                 reqwest::Client::builder()
                     .timeout(timeout)
@@ -82,16 +72,6 @@ impl Default for ZipkinPipelineBuilder {
             )),
             #[cfg(all(
                 not(feature = "reqwest-client"),
-                not(feature = "reqwest-blocking-client"),
-                feature = "surf-client"
-            ))]
-            client: Some(Arc::new(
-                surf::Client::try_from(surf::Config::new().set_timeout(Some(timeout)))
-                    .unwrap_or_else(|_| surf::Client::new()),
-            )),
-            #[cfg(all(
-                not(feature = "reqwest-client"),
-                not(feature = "surf-client"),
                 not(feature = "reqwest-blocking-client")
             ))]
             client: None,
@@ -120,30 +100,23 @@ impl ZipkinPipelineBuilder {
                 cfg.resource = Cow::Owned(Resource::new(
                     cfg.resource
                         .iter()
-                        .filter(|(k, _v)| **k != semcov::resource::SERVICE_NAME)
+                        .filter(|(k, _v)| k.as_str() != semcov::resource::SERVICE_NAME)
                         .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
                         .collect::<Vec<KeyValue>>(),
                 ));
                 cfg
             } else {
-                Config {
-                    resource: Cow::Owned(Resource::empty()),
-                    ..Default::default()
-                }
+                Config::default().with_resource(Resource::empty())
             };
             (config, Endpoint::new(service_name, self.service_addr))
         } else {
             let service_name = SdkProvidedResourceDetector
                 .detect(Duration::from_secs(0))
-                .get(semcov::resource::SERVICE_NAME)
+                .get(semcov::resource::SERVICE_NAME.into())
                 .unwrap()
                 .to_string();
             (
-                Config {
-                    // use a empty resource to prevent TracerProvider to assign a service name.
-                    resource: Cow::Owned(Resource::empty()),
-                    ..Default::default()
-                },
+                Config::default().with_resource(Resource::empty()),
                 Endpoint::new(service_name, self.service_addr),
             )
         }
@@ -171,35 +144,28 @@ impl ZipkinPipelineBuilder {
         let mut provider_builder = TracerProvider::builder().with_simple_exporter(exporter);
         provider_builder = provider_builder.with_config(config);
         let provider = provider_builder.build();
-        let tracer = opentelemetry::trace::TracerProvider::versioned_tracer(
-            &provider,
-            "opentelemetry-zipkin",
-            Some(env!("CARGO_PKG_VERSION")),
-            Some(semcov::SCHEMA_URL),
-            None,
-        );
+        let tracer =
+            opentelemetry::trace::TracerProvider::tracer_builder(&provider, "opentelemetry-zipkin")
+                .with_version(env!("CARGO_PKG_VERSION"))
+                .with_schema_url(semcov::SCHEMA_URL)
+                .build();
         let _ = global::set_tracer_provider(provider);
         Ok(tracer)
     }
 
     /// Install the Zipkin trace exporter pipeline with a batch span processor using the specified
     /// runtime.
-    pub fn install_batch<R: RuntimeChannel<BatchMessage>>(
-        mut self,
-        runtime: R,
-    ) -> Result<Tracer, TraceError> {
+    pub fn install_batch<R: RuntimeChannel>(mut self, runtime: R) -> Result<Tracer, TraceError> {
         let (config, endpoint) = self.init_config_and_endpoint();
         let exporter = self.init_exporter_with_endpoint(endpoint)?;
         let mut provider_builder = TracerProvider::builder().with_batch_exporter(exporter, runtime);
         provider_builder = provider_builder.with_config(config);
         let provider = provider_builder.build();
-        let tracer = opentelemetry::trace::TracerProvider::versioned_tracer(
-            &provider,
-            "opentelemetry-zipkin",
-            Some(env!("CARGO_PKG_VERSION")),
-            Some(semcov::SCHEMA_URL),
-            None,
-        );
+        let tracer =
+            opentelemetry::trace::TracerProvider::tracer_builder(&provider, "opentelemetry-zipkin")
+                .with_version(env!("CARGO_PKG_VERSION"))
+                .with_schema_url(semcov::SCHEMA_URL)
+                .build();
         let _ = global::set_tracer_provider(provider);
         Ok(tracer)
     }
@@ -265,7 +231,7 @@ impl trace::SpanExporter for Exporter {
 #[non_exhaustive]
 pub enum Error {
     /// No http client implementation found. User should provide one or enable features.
-    #[error("http client must be set, users can enable reqwest or surf feature to use http client implementation within create")]
+    #[error("http client must be set, users can enable reqwest feature to use http client implementation within create")]
     NoHttpClient,
 
     /// Http requests failed

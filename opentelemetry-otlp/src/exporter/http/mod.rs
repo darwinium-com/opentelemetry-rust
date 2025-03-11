@@ -1,16 +1,30 @@
+use super::{
+    default_headers, default_protocol, parse_header_string,
+    OTEL_EXPORTER_OTLP_HTTP_ENDPOINT_DEFAULT,
+};
 use crate::{
     ExportConfig, Protocol, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS,
     OTEL_EXPORTER_OTLP_TIMEOUT,
 };
 use http::{HeaderName, HeaderValue, Uri};
 use opentelemetry_http::HttpClient;
+use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
+#[cfg(feature = "logs")]
+use opentelemetry_proto::transform::logs::tonic::group_logs_by_resource_and_scope;
+#[cfg(feature = "trace")]
+use opentelemetry_proto::transform::trace::tonic::group_spans_by_resource_and_scope;
+#[cfg(feature = "logs")]
+use opentelemetry_sdk::export::logs::LogBatch;
+#[cfg(feature = "trace")]
+use opentelemetry_sdk::export::trace::SpanData;
+#[cfg(feature = "metrics")]
+use opentelemetry_sdk::metrics::data::ResourceMetrics;
+use prost::Message;
 use std::collections::HashMap;
 use std::env;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-use super::default_headers;
 
 #[cfg(feature = "metrics")]
 mod metrics;
@@ -22,12 +36,11 @@ mod logs;
 mod trace;
 
 /// Configuration of the http transport
-#[cfg(feature = "http-proto")]
+#[cfg(any(feature = "http-proto", feature = "http-json"))]
 #[derive(Debug)]
 #[cfg_attr(
     all(
         not(feature = "reqwest-client"),
-        not(feature = "surf-client"),
         not(feature = "reqwest-blocking-client")
     ),
     derive(Default)
@@ -40,31 +53,16 @@ pub(crate) struct HttpConfig {
     headers: Option<HashMap<String, String>>,
 }
 
-#[cfg(any(
-    feature = "reqwest-blocking-client",
-    feature = "reqwest-client",
-    feature = "surf-client"
-))]
+#[cfg(any(feature = "reqwest-blocking-client", feature = "reqwest-client",))]
 impl Default for HttpConfig {
     fn default() -> Self {
         HttpConfig {
             #[cfg(feature = "reqwest-blocking-client")]
             client: Some(Arc::new(reqwest::blocking::Client::new())),
-            #[cfg(all(
-                not(feature = "reqwest-blocking-client"),
-                not(feature = "surf-client"),
-                feature = "reqwest-client"
-            ))]
+            #[cfg(all(not(feature = "reqwest-blocking-client"), feature = "reqwest-client"))]
             client: Some(Arc::new(reqwest::Client::new())),
             #[cfg(all(
                 not(feature = "reqwest-client"),
-                not(feature = "reqwest-blocking-client"),
-                feature = "surf-client"
-            ))]
-            client: Some(Arc::new(surf::Client::new())),
-            #[cfg(all(
-                not(feature = "reqwest-client"),
-                not(feature = "surf-client"),
                 not(feature = "reqwest-blocking-client")
             ))]
             client: None,
@@ -80,7 +78,7 @@ impl Default for HttpConfig {
 /// ```
 /// # #[cfg(feature="metrics")]
 /// use opentelemetry_sdk::metrics::reader::{
-///     DefaultAggregationSelector, DefaultTemporalitySelector,
+///     DefaultTemporalitySelector,
 /// };
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -93,7 +91,6 @@ impl Default for HttpConfig {
 /// let metrics_exporter = opentelemetry_otlp::new_exporter()
 ///     .http()
 ///     .build_metrics_exporter(
-///         Box::new(DefaultAggregationSelector::new()),
 ///         Box::new(DefaultTemporalitySelector::new()),
 ///     )?;
 ///
@@ -114,7 +111,7 @@ impl Default for HttpExporterBuilder {
     fn default() -> Self {
         HttpExporterBuilder {
             exporter_config: ExportConfig {
-                protocol: Protocol::HttpBinary,
+                protocol: default_protocol(),
                 ..ExportConfig::default()
             },
             http_config: HttpConfig {
@@ -126,6 +123,12 @@ impl Default for HttpExporterBuilder {
 }
 
 impl HttpExporterBuilder {
+    /// Specify the OTLP protocol to be used by the exporter
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.exporter_config.protocol = protocol;
+        self
+    }
+
     /// Assign client implementation
     pub fn with_http_client<T: HttpClient + 'static>(mut self, client: T) -> Self {
         self.http_config.client = Some(Arc::new(client));
@@ -136,7 +139,11 @@ impl HttpExporterBuilder {
     pub fn with_headers(mut self, headers: HashMap<String, String>) -> Self {
         // headers will be wrapped, so we must do some logic to unwrap first.
         let mut inst_headers = self.http_config.headers.unwrap_or_default();
-        inst_headers.extend(headers);
+        inst_headers.extend(
+            headers
+                .into_iter()
+                .map(|(key, value)| (key, super::url_decode(&value).unwrap_or(value))),
+        );
         self.http_config.headers = Some(inst_headers);
         self
     }
@@ -148,7 +155,7 @@ impl HttpExporterBuilder {
         signal_timeout_var: &str,
         signal_http_headers_var: &str,
     ) -> Result<OtlpHttpClient, crate::Error> {
-        let endpoint = resolve_endpoint(
+        let endpoint = resolve_http_endpoint(
             signal_endpoint_var,
             signal_endpoint_path,
             self.exporter_config.endpoint.as_str(),
@@ -193,7 +200,13 @@ impl HttpExporterBuilder {
             add_header_from_string(&input, &mut headers);
         }
 
-        Ok(OtlpHttpClient::new(http_client, endpoint, headers, timeout))
+        Ok(OtlpHttpClient::new(
+            http_client,
+            endpoint,
+            headers,
+            self.exporter_config.protocol,
+            timeout,
+        ))
     }
 
     /// Create a log exporter with the current configuration
@@ -238,7 +251,6 @@ impl HttpExporterBuilder {
     #[cfg(feature = "metrics")]
     pub fn build_metrics_exporter(
         mut self,
-        aggregation_selector: Box<dyn opentelemetry_sdk::metrics::reader::AggregationSelector>,
         temporality_selector: Box<dyn opentelemetry_sdk::metrics::reader::TemporalitySelector>,
     ) -> opentelemetry::metrics::Result<crate::MetricsExporter> {
         use crate::{
@@ -253,11 +265,7 @@ impl HttpExporterBuilder {
             OTEL_EXPORTER_OTLP_METRICS_HEADERS,
         )?;
 
-        Ok(crate::MetricsExporter::new(
-            client,
-            temporality_selector,
-            aggregation_selector,
-        ))
+        Ok(crate::MetricsExporter::new(client, temporality_selector))
     }
 }
 
@@ -266,7 +274,11 @@ struct OtlpHttpClient {
     client: Mutex<Option<Arc<dyn HttpClient>>>,
     collector_endpoint: Uri,
     headers: HashMap<HeaderName, HeaderValue>,
+    protocol: Protocol,
     _timeout: Duration,
+    #[allow(dead_code)]
+    // <allow dead> would be removed once we support set_resource for metrics and traces.
+    resource: opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema,
 }
 
 impl OtlpHttpClient {
@@ -275,22 +287,91 @@ impl OtlpHttpClient {
         client: Arc<dyn HttpClient>,
         collector_endpoint: Uri,
         headers: HashMap<HeaderName, HeaderValue>,
+        protocol: Protocol,
         timeout: Duration,
     ) -> Self {
         OtlpHttpClient {
             client: Mutex::new(Some(client)),
             collector_endpoint,
             headers,
+            protocol,
             _timeout: timeout,
+            resource: ResourceAttributesWithSchema::default(),
+        }
+    }
+
+    #[cfg(feature = "trace")]
+    fn build_trace_export_body(
+        &self,
+        spans: Vec<SpanData>,
+    ) -> opentelemetry::trace::TraceResult<(Vec<u8>, &'static str)> {
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        let resource_spans = group_spans_by_resource_and_scope(spans, &self.resource);
+
+        let req = ExportTraceServiceRequest { resource_spans };
+        match self.protocol {
+            #[cfg(feature = "http-json")]
+            Protocol::HttpJson => match serde_json::to_string_pretty(&req) {
+                Ok(json) => Ok((json.into(), "application/json")),
+                Err(e) => Err(opentelemetry::trace::TraceError::from(e.to_string())),
+            },
+            _ => Ok((req.encode_to_vec(), "application/x-protobuf")),
+        }
+    }
+
+    #[cfg(feature = "logs")]
+    fn build_logs_export_body(
+        &self,
+        logs: LogBatch<'_>,
+    ) -> opentelemetry::logs::LogResult<(Vec<u8>, &'static str)> {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        let resource_logs = group_logs_by_resource_and_scope(logs, &self.resource);
+        let req = ExportLogsServiceRequest { resource_logs };
+
+        match self.protocol {
+            #[cfg(feature = "http-json")]
+            Protocol::HttpJson => match serde_json::to_string_pretty(&req) {
+                Ok(json) => Ok((json.into(), "application/json")),
+                Err(e) => Err(opentelemetry::logs::LogError::from(e.to_string())),
+            },
+            _ => Ok((req.encode_to_vec(), "application/x-protobuf")),
+        }
+    }
+
+    #[cfg(feature = "metrics")]
+    fn build_metrics_export_body(
+        &self,
+        metrics: &mut ResourceMetrics,
+    ) -> opentelemetry::metrics::Result<(Vec<u8>, &'static str)> {
+        use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+
+        let req: ExportMetricsServiceRequest = (&*metrics).into();
+
+        match self.protocol {
+            #[cfg(feature = "http-json")]
+            Protocol::HttpJson => match serde_json::to_string_pretty(&req) {
+                Ok(json) => Ok((json.into(), "application/json")),
+                Err(e) => Err(opentelemetry::metrics::MetricsError::Other(e.to_string())),
+            },
+            _ => Ok((req.encode_to_vec(), "application/x-protobuf")),
         }
     }
 }
 
+fn build_endpoint_uri(endpoint: &str, path: &str) -> Result<Uri, crate::Error> {
+    let path = if endpoint.ends_with('/') && path.starts_with('/') {
+        path.strip_prefix('/').unwrap()
+    } else {
+        path
+    };
+    format!("{endpoint}{path}").parse().map_err(From::from)
+}
+
 // see https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/protocol/exporter.md#endpoint-urls-for-otlphttp
-fn resolve_endpoint(
+fn resolve_http_endpoint(
     signal_endpoint_var: &str,
     signal_endpoint_path: &str,
-    provided_or_default_endpoint: &str,
+    provided_endpoint: &str,
 ) -> Result<Uri, crate::Error> {
     // per signal env var is not modified
     if let Some(endpoint) = env::var(signal_endpoint_var)
@@ -303,66 +384,47 @@ fn resolve_endpoint(
     // if signal env var is not set, then we check if the OTEL_EXPORTER_OTLP_ENDPOINT is set
     if let Some(endpoint) = env::var(OTEL_EXPORTER_OTLP_ENDPOINT)
         .ok()
-        .and_then(|s| format!("{s}{signal_endpoint_path}").parse().ok())
+        .and_then(|s| build_endpoint_uri(&s, signal_endpoint_path).ok())
     {
         return Ok(endpoint);
     }
 
-    // if neither works, we use the one provided in pipeline. If user never provide one, we will use the default one
-    format!("{provided_or_default_endpoint}{signal_endpoint_path}")
-        .parse()
-        .map_err(From::from)
+    if provided_endpoint.is_empty() {
+        build_endpoint_uri(
+            OTEL_EXPORTER_OTLP_HTTP_ENDPOINT_DEFAULT,
+            signal_endpoint_path,
+        )
+    } else {
+        provided_endpoint.parse().map_err(From::from)
+    }
 }
 
 #[allow(clippy::mutable_key_type)] // http headers are not mutated
 fn add_header_from_string(input: &str, headers: &mut HashMap<HeaderName, HeaderValue>) {
-    for pair in input.split_terminator(',') {
-        if pair.trim().is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = pair.trim().split_once('=') {
-            if !k.trim().is_empty() && !v.trim().is_empty() {
-                if let (Ok(key), Ok(value)) = (
-                    HeaderName::from_str(k.trim()),
-                    HeaderValue::from_str(v.trim()),
-                ) {
-                    headers.insert(key, value);
-                }
-            }
-        }
-    }
+    headers.extend(parse_header_string(input).filter_map(|(key, value)| {
+        Some((
+            HeaderName::from_str(key).ok()?,
+            HeaderValue::from_str(&value).ok()?,
+        ))
+    }));
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT};
-    use std::sync::Mutex;
+    use crate::exporter::tests::run_env_test;
+    use crate::{
+        new_exporter, WithExportConfig, OTEL_EXPORTER_OTLP_ENDPOINT,
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+    };
 
-    // Make sure env tests are not running concurrently
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn run_env_test<T, F>(env_vars: T, f: F)
-    where
-        F: FnOnce(),
-        T: Into<Vec<(&'static str, &'static str)>>,
-    {
-        let _env_lock = ENV_LOCK.lock().expect("env test lock poisoned");
-        let env_vars = env_vars.into();
-        for (k, v) in env_vars.iter() {
-            std::env::set_var(k, v);
-        }
-        f();
-        for (k, _) in env_vars {
-            std::env::remove_var(k);
-        }
-    }
+    use super::{build_endpoint_uri, resolve_http_endpoint};
 
     #[test]
     fn test_append_signal_path_to_generic_env() {
         run_env_test(
             vec![(OTEL_EXPORTER_OTLP_ENDPOINT, "http://example.com")],
             || {
-                let endpoint = super::resolve_endpoint(
+                let endpoint = resolve_http_endpoint(
                     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
                     "/v1/traces",
                     "http://localhost:4317",
@@ -378,7 +440,7 @@ mod tests {
         run_env_test(
             vec![(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, "http://example.com")],
             || {
-                let endpoint = super::resolve_endpoint(
+                let endpoint = super::resolve_http_endpoint(
                     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
                     "/v1/traces",
                     "http://localhost:4317",
@@ -397,7 +459,7 @@ mod tests {
                 (OTEL_EXPORTER_OTLP_ENDPOINT, "http://wrong.com"),
             ],
             || {
-                let endpoint = super::resolve_endpoint(
+                let endpoint = super::resolve_http_endpoint(
                     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
                     "/v1/traces",
                     "http://localhost:4317",
@@ -411,11 +473,28 @@ mod tests {
     #[test]
     fn test_use_provided_or_default_when_others_missing() {
         run_env_test(vec![], || {
-            let endpoint =
-                super::resolve_endpoint("NON_EXISTENT_VAR", "/v1/traces", "http://localhost:4317")
-                    .unwrap();
-            assert_eq!(endpoint, "http://localhost:4317/v1/traces");
+            let endpoint = super::resolve_http_endpoint(
+                "NON_EXISTENT_VAR",
+                "/v1/traces",
+                "http://localhost:4317",
+            )
+            .unwrap();
+            assert_eq!(endpoint, "http://localhost:4317/");
         });
+    }
+
+    #[test]
+    fn test_build_endpoint_uri() {
+        let uri = build_endpoint_uri("https://example.com", "/v1/traces").unwrap();
+        assert_eq!(uri, "https://example.com/v1/traces");
+
+        // Should be no duplicate slahes:
+        let uri = build_endpoint_uri("https://example.com/", "/v1/traces").unwrap();
+        assert_eq!(uri, "https://example.com/v1/traces");
+
+        // Append paths properly:
+        let uri = build_endpoint_uri("https://example.com/additional/path/", "/v1/traces").unwrap();
+        assert_eq!(uri, "https://example.com/additional/path/v1/traces");
     }
 
     #[test]
@@ -429,7 +508,7 @@ mod tests {
                 (OTEL_EXPORTER_OTLP_ENDPOINT, "http://example.com"),
             ],
             || {
-                let endpoint = super::resolve_endpoint(
+                let endpoint = super::resolve_http_endpoint(
                     OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
                     "/v1/traces",
                     "http://localhost:4317",
@@ -443,7 +522,7 @@ mod tests {
     #[test]
     fn test_all_invalid_urls_falls_back_to_error() {
         run_env_test(vec![], || {
-            let result = super::resolve_endpoint(
+            let result = super::resolve_http_endpoint(
                 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
                 "/v1/traces",
                 "-*/*-/*-//-/-/yet-another-invalid-uri",
@@ -537,5 +616,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_http_exporter_endpoint() {
+        // default endpoint should add signal path
+        run_env_test(vec![], || {
+            let exporter = new_exporter().http();
+
+            let url = resolve_http_endpoint(
+                OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+                "/v1/traces",
+                exporter.exporter_config.endpoint.as_str(),
+            )
+            .unwrap();
+
+            assert_eq!(url, "http://localhost:4318/v1/traces");
+        });
+
+        // if builder endpoint is set, it should not add signal path
+        run_env_test(vec![], || {
+            let exporter = new_exporter()
+                .http()
+                .with_endpoint("http://localhost:4318/v1/tracesbutnotreally");
+
+            let url = resolve_http_endpoint(
+                OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+                "/v1/traces",
+                exporter.exporter_config.endpoint.as_str(),
+            )
+            .unwrap();
+
+            assert_eq!(url, "http://localhost:4318/v1/tracesbutnotreally");
+        });
     }
 }

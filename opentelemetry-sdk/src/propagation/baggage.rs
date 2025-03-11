@@ -1,48 +1,8 @@
-//! # OpenTelemetry Baggage API
-//!
-//! Baggage is used to annotate telemetry, adding context and
-//! information to metrics, traces, and logs. It is an abstract data type
-//! represented by a set of name-value pairs describing user-defined properties.
-//! Each name in a [`Baggage`] is associated with exactly one value.
-//! `Baggage`s are serialized according to the editor's draft of
-//! the [W3C Baggage] specification.
-//!
-//! [`Baggage`]: opentelemetry::baggage::Baggage
-//! [W3C Baggage]: https://w3c.github.io/baggage/
-//!
-//! # Examples
-//!
-//! ```
-//! use opentelemetry::{baggage::BaggageExt, Key, propagation::TextMapPropagator};
-//! use opentelemetry_sdk::propagation::BaggagePropagator;
-//! use std::collections::HashMap;
-//!
-//! // Example baggage value passed in externally via http headers
-//! let mut headers = HashMap::new();
-//! headers.insert("baggage".to_string(), "user_id=1".to_string());
-//!
-//! let propagator = BaggagePropagator::new();
-//! // can extract from any type that impls `Extractor`, usually an HTTP header map
-//! let cx = propagator.extract(&headers);
-//!
-//! // Iterate over extracted name-value pairs
-//! for (name, value) in cx.baggage() {
-//!     // ...
-//! }
-//!
-//! // Add new baggage
-//! let cx_with_additions = cx.with_baggage(vec![Key::new("server_id").i64(42)]);
-//!
-//! // Inject baggage into http request
-//! propagator.inject_context(&cx_with_additions, &mut headers);
-//!
-//! let header_value = headers.get("baggage").expect("header is injected");
-//! assert!(header_value.contains("user_id=1"), "still contains previous name-value");
-//! assert!(header_value.contains("server_id=42"), "contains new name-value pair");
-//! ```
 use once_cell::sync::Lazy;
+use opentelemetry::propagation::PropagationError;
 use opentelemetry::{
     baggage::{BaggageExt, KeyValueMetadata},
+    global,
     propagation::{text_map_propagator::FieldIter, Extractor, Injector, TextMapPropagator},
     Context,
 };
@@ -65,7 +25,7 @@ static BAGGAGE_FIELDS: Lazy<[String; 1]> = Lazy::new(|| [BAGGAGE_HEADER.to_owned
 /// # Examples
 ///
 /// ```
-/// use opentelemetry::{baggage::BaggageExt, Key, propagation::TextMapPropagator};
+/// use opentelemetry::{baggage::BaggageExt, KeyValue, propagation::TextMapPropagator};
 /// use opentelemetry_sdk::propagation::BaggagePropagator;
 /// use std::collections::HashMap;
 ///
@@ -83,7 +43,7 @@ static BAGGAGE_FIELDS: Lazy<[String; 1]> = Lazy::new(|| [BAGGAGE_HEADER.to_owned
 /// }
 ///
 /// // Add new baggage
-/// let cx_with_additions = cx.with_baggage(vec![Key::new("server_id").i64(42)]);
+/// let cx_with_additions = cx.with_baggage(vec![KeyValue::new("server_id", 42)]);
 ///
 /// // Inject baggage into http request
 /// propagator.inject_context(&cx_with_additions, &mut headers);
@@ -141,30 +101,44 @@ impl TextMapPropagator for BaggagePropagator {
                 {
                     let mut iter = name_and_value.split('=');
                     if let (Some(name), Some(value)) = (iter.next(), iter.next()) {
-                        let name = percent_decode_str(name).decode_utf8().map_err(|_| ())?;
-                        let value = percent_decode_str(value).decode_utf8().map_err(|_| ())?;
+                        let decode_name = percent_decode_str(name).decode_utf8();
+                        let decode_value = percent_decode_str(value).decode_utf8();
 
-                        // Here we don't store the first ; into baggage since it should be treated
-                        // as separator rather part of metadata
-                        let decoded_props = props
-                            .iter()
-                            .flat_map(|prop| percent_decode_str(prop).decode_utf8())
-                            .map(|prop| prop.trim().to_string())
-                            .collect::<Vec<String>>()
-                            .join(";"); // join with ; because we deleted all ; when calling split above
+                        if let (Ok(name), Ok(value)) = (decode_name, decode_value) {
+                            // Here we don't store the first ; into baggage since it should be treated
+                            // as separator rather part of metadata
+                            let decoded_props = props
+                                .iter()
+                                .flat_map(|prop| percent_decode_str(prop).decode_utf8())
+                                .map(|prop| prop.trim().to_string())
+                                .collect::<Vec<String>>()
+                                .join(";"); // join with ; because we deleted all ; when calling split above
 
-                        Ok(KeyValueMetadata::new(
-                            name.trim().to_owned(),
-                            value.trim().to_string(),
-                            decoded_props.as_str(),
-                        ))
+                            Some(KeyValueMetadata::new(
+                                name.trim().to_owned(),
+                                value.trim().to_string(),
+                                decoded_props.as_str(),
+                            ))
+                        } else {
+                            global::handle_error(PropagationError::extract(
+                                "invalid UTF8 string in key values",
+                                "BaggagePropagator",
+                            ));
+                            None
+                        }
                     } else {
-                        // Invalid name-value format
-                        Err(())
+                        global::handle_error(PropagationError::extract(
+                            "invalid baggage key-value format",
+                            "BaggagePropagator",
+                        ));
+                        None
                     }
                 } else {
-                    // Invalid baggage value format
-                    Err(())
+                    global::handle_error(PropagationError::extract(
+                        "invalid baggage format",
+                        "BaggagePropagator",
+                    ));
+                    None
                 }
             });
             cx.with_baggage(baggage)
@@ -181,9 +155,7 @@ impl TextMapPropagator for BaggagePropagator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry::{
-        baggage::BaggageMetadata, propagation::TextMapPropagator, Key, KeyValue, StringValue, Value,
-    };
+    use opentelemetry::{baggage::BaggageMetadata, Key, KeyValue, StringValue, Value};
     use std::collections::HashMap;
 
     #[rustfmt::skip]
@@ -214,7 +186,7 @@ mod tests {
              vec![
                  (Key::new("key1"), (Value::from("value1"), BaggageMetadata::from("property1;property2"))),
                  (Key::new("key2"), (Value::from("value2"), BaggageMetadata::default())),
-                 (Key::new("key3"), (Value::from("value3"), BaggageMetadata::from("propertyKey=propertyValue")))
+                 (Key::new("key3"), (Value::from("value3"), BaggageMetadata::from("propertyKey=propertyValue"))),
              ].into_iter().collect()),
         ]
     }
@@ -262,12 +234,12 @@ mod tests {
                 vec![
                     KeyValueMetadata::new("key1", "val1", "prop1"),
                     KeyValue::new("key2", "val2").into(),
-                    KeyValueMetadata::new("key3", "val3", "anykey=anyvalue")
+                    KeyValueMetadata::new("key3", "val3", "anykey=anyvalue"),
                 ],
                 vec![
                     "key1=val1;prop1",
                     "key2=val2",
-                    "key3=val3;anykey=anyvalue"
+                    "key3=val3;anykey=anyvalue",
                 ],
             )
         ]

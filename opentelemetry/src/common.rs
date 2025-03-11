@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::sync::Arc;
 use std::{fmt, hash};
 
@@ -6,7 +6,7 @@ use std::{fmt, hash};
 ///
 /// See the [attribute naming] spec for guidelines.
 ///
-/// [attribute naming]: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.9.0/specification/common/attribute-naming.md
+/// [attribute naming]: https://github.com/open-telemetry/semantic-conventions/blob/main/docs/general/attribute-naming.md
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Key(OtelString);
 
@@ -30,46 +30,6 @@ impl Key {
     /// Create a new const `Key`.
     pub const fn from_static_str(value: &'static str) -> Self {
         Key(OtelString::Static(value))
-    }
-
-    /// Create a `KeyValue` pair for `bool` values.
-    pub fn bool<T: Into<bool>>(self, value: T) -> KeyValue {
-        KeyValue {
-            key: self,
-            value: Value::Bool(value.into()),
-        }
-    }
-
-    /// Create a `KeyValue` pair for `i64` values.
-    pub fn i64(self, value: i64) -> KeyValue {
-        KeyValue {
-            key: self,
-            value: Value::I64(value),
-        }
-    }
-
-    /// Create a `KeyValue` pair for `f64` values.
-    pub fn f64(self, value: f64) -> KeyValue {
-        KeyValue {
-            key: self,
-            value: Value::F64(value),
-        }
-    }
-
-    /// Create a `KeyValue` pair for string-like values.
-    pub fn string(self, value: impl Into<StringValue>) -> KeyValue {
-        KeyValue {
-            key: self,
-            value: Value::String(value.into()),
-        }
-    }
-
-    /// Create a `KeyValue` pair for arrays.
-    pub fn array<T: Into<Array>>(self, value: T) -> KeyValue {
-        KeyValue {
-            key: self,
-            value: Value::Array(value.into()),
-        }
     }
 
     /// Returns a reference to the underlying key name
@@ -132,6 +92,18 @@ impl fmt::Display for Key {
             OtelString::Static(s) => s.fmt(fmt),
             OtelString::RefCounted(s) => s.fmt(fmt),
         }
+    }
+}
+
+impl Borrow<str> for Key {
+    fn borrow(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for Key {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
     }
 }
 
@@ -449,12 +421,10 @@ pub struct InstrumentationLibrary {
     /// # Examples
     ///
     /// ```
-    /// let library = opentelemetry::InstrumentationLibrary::new(
-    ///     "my-crate",
-    ///     Some(env!("CARGO_PKG_VERSION")),
-    ///     Some("https://opentelemetry.io/schemas/1.17.0"),
-    ///     None,
-    /// );
+    /// let library = opentelemetry::InstrumentationLibrary::builder("my-crate").
+    ///     with_version(env!("CARGO_PKG_VERSION")).
+    ///     with_schema_url("https://opentelemetry.io/schemas/1.17.0").
+    ///     build();
     /// ```
     pub version: Option<Cow<'static, str>>,
 
@@ -487,7 +457,10 @@ impl hash::Hash for InstrumentationLibrary {
 }
 
 impl InstrumentationLibrary {
+    /// Deprecated, use [`InstrumentationLibrary::builder()`]
+    ///
     /// Create an new instrumentation library.
+    #[deprecated(since = "0.23.0", note = "Please use builder() instead")]
     pub fn new(
         name: impl Into<Cow<'static, str>>,
         version: Option<impl Into<Cow<'static, str>>>,
@@ -499,6 +472,97 @@ impl InstrumentationLibrary {
             version: version.map(Into::into),
             schema_url: schema_url.map(Into::into),
             attributes: attributes.unwrap_or_default(),
+        }
+    }
+
+    /// Create a new builder to create an [InstrumentationLibrary]
+    pub fn builder<T: Into<Cow<'static, str>>>(name: T) -> InstrumentationLibraryBuilder {
+        InstrumentationLibraryBuilder {
+            name: name.into(),
+            version: None,
+            schema_url: None,
+            attributes: None,
+        }
+    }
+}
+
+/// Configuration options for [InstrumentationLibrary].
+///
+/// An instrumentation library is a library or crate providing instrumentation.
+/// It should be named to follow any naming conventions of the instrumented
+/// library (e.g. 'middleware' for a web framework).
+///
+/// Apart from the name, all other fields are optional.
+///
+/// See the [instrumentation libraries] spec for more information.
+///
+/// [instrumentation libraries]: https://github.com/open-telemetry/opentelemetry-specification/blob/v1.9.0/specification/overview.md#instrumentation-libraries
+#[derive(Debug)]
+pub struct InstrumentationLibraryBuilder {
+    name: Cow<'static, str>,
+
+    version: Option<Cow<'static, str>>,
+
+    schema_url: Option<Cow<'static, str>>,
+
+    attributes: Option<Vec<KeyValue>>,
+}
+
+impl InstrumentationLibraryBuilder {
+    /// Configure the version for the instrumentation library
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let library = opentelemetry::InstrumentationLibrary::builder("my-crate")
+    ///     .with_version("v0.1.0")
+    ///     .build();
+    /// ```
+    pub fn with_version(mut self, version: impl Into<Cow<'static, str>>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    /// Configure the Schema URL for the instrumentation library
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let library = opentelemetry::InstrumentationLibrary::builder("my-crate")
+    ///     .with_schema_url("https://opentelemetry.io/schemas/1.17.0")
+    ///     .build();
+    /// ```
+    pub fn with_schema_url(mut self, schema_url: impl Into<Cow<'static, str>>) -> Self {
+        self.schema_url = Some(schema_url.into());
+        self
+    }
+
+    /// Configure the attributes for the instrumentation library
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use opentelemetry::KeyValue;
+    ///
+    /// let library = opentelemetry::InstrumentationLibrary::builder("my-crate")
+    ///     .with_attributes([KeyValue::new("k", "v")])
+    ///     .build();
+    /// ```
+    pub fn with_attributes<I>(mut self, attributes: I) -> Self
+    where
+        I: IntoIterator<Item = KeyValue>,
+    {
+        self.attributes = Some(attributes.into_iter().collect());
+        self
+    }
+
+    /// Create a new [InstrumentationLibrary] from this configuration
+    pub fn build(self) -> InstrumentationLibrary {
+        InstrumentationLibrary {
+            name: self.name,
+            version: self.version,
+            schema_url: self.schema_url,
+            attributes: self.attributes.unwrap_or_default(),
         }
     }
 }

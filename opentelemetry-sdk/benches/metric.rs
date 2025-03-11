@@ -10,8 +10,8 @@ use opentelemetry_sdk::{
     metrics::{
         data::{ResourceMetrics, Temporality},
         new_view,
-        reader::{AggregationSelector, MetricReader, TemporalitySelector},
-        Aggregation, Instrument, InstrumentKind, ManualReader, MeterProvider, Pipeline, Stream,
+        reader::{MetricReader, TemporalitySelector},
+        Aggregation, Instrument, InstrumentKind, ManualReader, Pipeline, SdkMeterProvider, Stream,
         View,
     },
     Resource,
@@ -23,12 +23,6 @@ struct SharedReader(Arc<dyn MetricReader>);
 impl TemporalitySelector for SharedReader {
     fn temporality(&self, kind: InstrumentKind) -> Temporality {
         self.0.temporality(kind)
-    }
-}
-
-impl AggregationSelector for SharedReader {
-    fn aggregation(&self, kind: InstrumentKind) -> Aggregation {
-        self.0.aggregation(kind)
     }
 }
 
@@ -150,7 +144,7 @@ fn bench_counter(view: Option<Box<dyn View>>, temporality: &str) -> (SharedReade
                 .build(),
         ))
     };
-    let mut builder = MeterProvider::builder().with_reader(rdr.clone());
+    let mut builder = SdkMeterProvider::builder().with_reader(rdr.clone());
     if let Some(view) = view {
         builder = builder.with_view(view);
     }
@@ -349,7 +343,7 @@ fn counters(c: &mut Criterion) {
 
 const MAX_BOUND: usize = 100000;
 
-fn bench_histogram(bound_count: usize) -> (SharedReader, Histogram<i64>) {
+fn bench_histogram(bound_count: usize) -> (SharedReader, Histogram<u64>) {
     let mut bounds = vec![0; bound_count];
     #[allow(clippy::needless_range_loop)]
     for i in 0..bounds.len() {
@@ -367,13 +361,13 @@ fn bench_histogram(bound_count: usize) -> (SharedReader, Histogram<i64>) {
     );
 
     let r = SharedReader(Arc::new(ManualReader::default()));
-    let mut builder = MeterProvider::builder().with_reader(r.clone());
+    let mut builder = SdkMeterProvider::builder().with_reader(r.clone());
     if let Some(view) = view {
         builder = builder.with_view(view);
     }
     let mtr = builder.build().meter("test_meter");
     let hist = mtr
-        .i64_histogram(format!("histogram_{}", bound_count))
+        .u64_histogram(format!("histogram_{}", bound_count))
         .init();
 
     (r, hist)
@@ -393,7 +387,7 @@ fn histograms(c: &mut Criterion) {
                     format!("V,{},{},{}", bound_size, attr_size, i),
                 ))
             }
-            let value: i64 = rng.gen_range(0..MAX_BOUND).try_into().unwrap();
+            let value: u64 = rng.gen_range(0..MAX_BOUND).try_into().unwrap();
             group.bench_function(
                 format!("Record{}Attrs{}bounds", attr_size, bound_size),
                 |b| b.iter(|| hist.record(value, &attributes)),
@@ -408,13 +402,13 @@ fn histograms(c: &mut Criterion) {
 
 fn benchmark_collect_histogram(b: &mut Bencher, n: usize) {
     let r = SharedReader(Arc::new(ManualReader::default()));
-    let mtr = MeterProvider::builder()
+    let mtr = SdkMeterProvider::builder()
         .with_reader(r.clone())
         .build()
         .meter("sdk/metric/bench/histogram");
 
     for i in 0..n {
-        let h = mtr.i64_histogram(format!("fake_data_{i}")).init();
+        let h = mtr.u64_histogram(format!("fake_data_{i}")).init();
         h.record(1, &[]);
     }
 

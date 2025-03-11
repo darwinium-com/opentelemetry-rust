@@ -3,13 +3,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use http::{header::CONTENT_TYPE, Method};
 use opentelemetry::logs::{LogError, LogResult};
-use opentelemetry_sdk::export::logs::{LogData, LogExporter};
+use opentelemetry_sdk::export::logs::{LogBatch, LogExporter};
 
 use super::OtlpHttpClient;
 
 #[async_trait]
 impl LogExporter for OtlpHttpClient {
-    async fn export(&mut self, batch: Vec<LogData>) -> LogResult<()> {
+    async fn export(&mut self, batch: LogBatch<'_>) -> LogResult<()> {
         let client = self
             .client
             .lock()
@@ -19,7 +19,7 @@ impl LogExporter for OtlpHttpClient {
                 _ => Err(LogError::Other("exporter is already shut down".into())),
             })?;
 
-        let (body, content_type) = build_body(batch)?;
+        let (body, content_type) = { self.build_logs_export_body(batch)? };
         let mut request = http::Request::builder()
             .method(Method::POST)
             .uri(&self.collector_endpoint)
@@ -31,7 +31,18 @@ impl LogExporter for OtlpHttpClient {
             request.headers_mut().insert(k.clone(), v.clone());
         }
 
-        client.send(request).await?;
+        let request_uri = request.uri().to_string();
+        let response = client.send(request).await?;
+
+        if !response.status().is_success() {
+            let error = format!(
+                "OpenTelemetry logs export failed. Url: {}, Status Code: {}, Response: {:?}",
+                response.status().as_u16(),
+                request_uri,
+                response.body()
+            );
+            return Err(LogError::Other(error.into()));
+        }
 
         Ok(())
     }
@@ -39,25 +50,8 @@ impl LogExporter for OtlpHttpClient {
     fn shutdown(&mut self) {
         let _ = self.client.lock().map(|mut c| c.take());
     }
-}
 
-#[cfg(feature = "http-proto")]
-fn build_body(logs: Vec<LogData>) -> LogResult<(Vec<u8>, &'static str)> {
-    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-    use prost::Message;
-
-    let req = ExportLogsServiceRequest {
-        resource_logs: logs.into_iter().map(Into::into).collect(),
-    };
-    let mut buf = vec![];
-    req.encode(&mut buf).map_err(crate::Error::from)?;
-
-    Ok((buf, "application/x-protobuf"))
-}
-
-#[cfg(not(feature = "http-proto"))]
-fn build_body(logs: Vec<LogData>) -> LogResult<(Vec<u8>, &'static str)> {
-    Err(LogsError::Other(
-        "No http protocol configured. Enable one via `http-proto`".into(),
-    ))
+    fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
+        self.resource = resource.into();
+    }
 }

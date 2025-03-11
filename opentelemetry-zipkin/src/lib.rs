@@ -71,9 +71,7 @@
 //! crate. While this is compatible with both async and non-async projects, it
 //! is not optimal for high-performance async applications as it will block the
 //! executor thread. Consider using the `reqwest-client` (without blocking)
-//! or `surf-client` features if you are in the `tokio` or `async-std`
-//! ecosystems respectively, or select whichever client you prefer as shown
-//! below.
+//! if you are in the `tokio` ecosystem.
 //!
 //! Note that async http clients may require a specific async runtime to be
 //! available so be sure to match them appropriately.
@@ -97,28 +95,33 @@
 //! use http::{Request, Response};
 //! use std::convert::TryInto as _;
 //! use std::error::Error;
-//! use hyper::{client::HttpConnector, Body};
+//! use http_body_util::{BodyExt, Full};
+//! use hyper_util::{
+//!     client::legacy::{Client, connect::HttpConnector},
+//!     rt::tokio::TokioExecutor,
+//! };
 //!
-//! // `reqwest` and `surf` are supported through features, if you prefer an
+//! // `reqwest` is supported through a feature, if you prefer an
 //! // alternate http client you can add support by implementing `HttpClient` as
 //! // shown here.
 //! #[derive(Debug)]
-//! struct HyperClient(hyper::Client<HttpConnector, Body>);
+//! struct HyperClient(Client<HttpConnector, Full<Bytes>>);
 //!
 //! #[async_trait]
 //! impl HttpClient for HyperClient {
 //!     async fn send(&self, req: Request<Vec<u8>>) -> Result<Response<Bytes>, HttpError> {
 //!         let resp = self
 //!             .0
-//!             .request(req.map(|v| Body::from(v)))
+//!             .request(req.map(|v| Full::new(Bytes::from(v))))
 //!             .await?;
 //!
 //!         let response = Response::builder()
 //!             .status(resp.status())
 //!             .body({
-//!                 hyper::body::to_bytes(resp.into_body())
+//!                 resp.collect()
 //!                     .await
 //!                     .expect("cannot decode response")
+//!                     .to_bytes()
 //!             })
 //!             .expect("cannot build response");
 //!
@@ -129,7 +132,12 @@
 //! fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
 //!     global::set_text_map_propagator(opentelemetry_zipkin::Propagator::new());
 //!     let tracer = opentelemetry_zipkin::new_pipeline()
-//!         .with_http_client(HyperClient(hyper::Client::new()))
+//!         .with_http_client(
+//!             HyperClient(
+//!                 Client::builder(TokioExecutor::new())
+//!                     .build_http()
+//!             )
+//!         )
 //!         .with_service_name("my_app")
 //!         .with_service_address("127.0.0.1:8080".parse()?)
 //!         .with_collector_endpoint("http://localhost:9411/api/v2/spans")
@@ -161,7 +169,6 @@
 //! * `reqwest-blocking-client`: Export spans using the reqwest blocking http
 //!   client (enabled by default).
 //! * `reqwest-client`: Export spans using the reqwest non-blocking http client.
-//! * `surf-client`: Export spans using the surf non-blocking http client.
 //!
 //! ## Supported Rust Versions
 //!

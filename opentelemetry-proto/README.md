@@ -6,6 +6,5 @@
 This crate contains generated files from [opentelemetry-proto](https://github.com/open-telemetry/opentelemetry-proto)
 repository and transformation between types from generated files and types defined in [opentelemetry](https://github.com/open-telemetry/opentelemetry-rust/tree/main/opentelemetry).
 
-Based on the grpc framework needed, users can choose to generate files using [tonic](https://github.com/hyperium/tonic)
-or [grpcio](https://github.com/tikv/grpc-rs).
 
+*Compiler support: [requires `rustc` 1.71.1+]

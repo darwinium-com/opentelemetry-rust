@@ -1,17 +1,34 @@
 //! Export telemetry signals to stdout.
+//! <div class="warning">This exporter is designed for debugging and learning purposes. It is not
+//! recommended for use in production environments. The output format might not be
+//! exhaustive and is subject to change at any time.
+//! </div>
+//!
+//! # Feature Flags
+//! The following feature flags can enable exporters for different telemetry signals:
+//!
+//! * `trace`: Includes the trace exporters.
+//! * `metrics`: Includes the metrics exporters.
+//! * `logs`: Includes the logs exporters.
+//!
+//! The following feature flags generate additional code and types:
+//! * `populate-logs-event-name`: Enables sending `LogRecord::event_name` as an attribute
+//!    with the key `name`
 //!
 //! # Examples
 //!
 //! ```no_run
-//! # #[cfg(all(feature = "metrics", feature = "trace"))]
+//! # #[cfg(all(feature = "metrics", feature = "trace", feature = "logs"))]
 //! {
-//! use opentelemetry::metrics::MeterProvider as _;
+//! use opentelemetry::metrics::MeterProvider;
 //! use opentelemetry::trace::{Span, Tracer, TracerProvider as _};
 //! use opentelemetry::{Context, KeyValue};
 //!
-//! use opentelemetry_sdk::metrics::{MeterProvider, PeriodicReader};
+//! use opentelemetry_sdk::metrics::{SdkMeterProvider, PeriodicReader};
 //! use opentelemetry_sdk::runtime;
 //! use opentelemetry_sdk::trace::TracerProvider;
+//!
+//! use opentelemetry_sdk::logs::LoggerProvider;
 //!
 //! fn init_trace() -> TracerProvider {
 //!     let exporter = opentelemetry_stdout::SpanExporter::default();
@@ -20,22 +37,33 @@
 //!         .build()
 //! }
 //!
-//! fn init_metrics() -> MeterProvider {
+//! fn init_metrics() -> SdkMeterProvider {
 //!     let exporter = opentelemetry_stdout::MetricsExporter::default();
 //!     let reader = PeriodicReader::builder(exporter, runtime::Tokio).build();
-//!     MeterProvider::builder().with_reader(reader).build()
+//!     SdkMeterProvider::builder().with_reader(reader).build()
+//! }
+//!
+//! fn init_logs() -> LoggerProvider {
+//!     let exporter = opentelemetry_stdout::LogExporter::default();
+//!     LoggerProvider::builder()
+//!         .with_simple_exporter(exporter)
+//!         .build()
 //! }
 //!
 //! let tracer_provider = init_trace();
 //! let meter_provider = init_metrics();
+//! let logger_provider = init_logs();
 //!
-//! // recorded traces and metrics will now be sent to stdout:
+//! // recorded traces, metrics and logs will now be sent to stdout:
 //!
-//! // {"resourceMetrics":{"resource":{"attributes":[{"key":"service.name","value":{"str..
-//! // {"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stri..
 //! # }
 //! ```
 #![warn(missing_debug_implementations, missing_docs)]
+#![cfg_attr(
+    docsrs,
+    feature(doc_cfg, doc_auto_cfg),
+    deny(rustdoc::broken_intra_doc_links)
+)]
 
 pub(crate) mod common;
 

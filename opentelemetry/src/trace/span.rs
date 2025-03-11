@@ -110,7 +110,8 @@ pub trait Span {
     /// Set an attribute of this span.
     ///
     /// Setting an attribute with the same key as an existing attribute
-    /// generally overwrites the existing attribute's value.
+    /// results in both being stored as attribute, without any de-duplication
+    /// performed.
     ///
     /// Note that the OpenTelemetry project documents certain "[standard
     /// attributes]" that have prescribed semantic meanings and are available via
@@ -123,7 +124,8 @@ pub trait Span {
     /// Set multiple attributes of this span.
     ///
     /// Setting an attribute with the same key as an existing attribute
-    /// generally overwrites the existing attribute's value.
+    /// results in both being stored as attribute, without any de-duplication
+    /// performed.
     ///
     /// Note that the OpenTelemetry project documents certain "[standard
     /// attributes]" that have prescribed semantic meanings and are available via
@@ -151,6 +153,22 @@ pub trait Span {
     fn update_name<T>(&mut self, new_name: T)
     where
         T: Into<Cow<'static, str>>;
+
+    /// Adds [`Link`] to another [`SpanContext`].
+    ///
+    /// This method allows linking the current span to another span, identified by its `SpanContext`. Links can be used
+    /// to connect spans from different traces or within the same trace. Attributes can be attached to the link to
+    /// provide additional context or metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `span_context` - The `SpanContext` of the span to link to. This represents the target span's unique identifiers
+    ///   and trace information.
+    /// * `attributes` - A vector of `KeyValue` pairs that describe additional attributes of the link. These attributes
+    ///   can include any contextual information relevant to the link between the spans.
+    ///
+    /// [`Link`]: crate::trace::Link
+    fn add_link(&mut self, span_context: SpanContext, attributes: Vec<KeyValue>);
 
     /// Signals that the operation described by this span has now ended.
     fn end(&mut self) {

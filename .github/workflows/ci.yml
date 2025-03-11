@@ -6,84 +6,124 @@ on:
   push:
     branches:
     - main
+    paths-ignore:
+    - '**.md'
 jobs:
   test:
     strategy:
       matrix:
+        # test both stable and beta versions of Rust on ubuntu-latest
+        os: [ubuntu-latest]
         rust: [stable, beta]
-    runs-on: ubuntu-latest
+        # test only stable version of Rust on Windows and MacOS
+        include:
+          - rust: stable
+            os: windows-latest
+          - rust: stable
+            os: macos-latest
+          - rust: stable
+            os: actuated-arm64-4cpu-16gb
+    runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v1
+    - name: Free disk space
+      if: ${{ matrix.os == 'ubuntu-latest'}}
+      run: |
+        df -h
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/share/dotnet
+        df -h
+    - uses: actions/checkout@v4
       with:
         submodules: true
-    - uses: actions-rs/toolchain@v1
+    - uses: dtolnay/rust-toolchain@master
       with:
         toolchain: ${{ matrix.rust }}
         components: rustfmt
-        profile: minimal
-    - uses: arduino/setup-protoc@v1
+    - name: "Set rustup profile"
+      run: rustup set profile minimal
+    - uses: arduino/setup-protoc@v3
+      with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
     - name: Test
-      run: ./scripts/test.sh
+      run: bash ./scripts/test.sh
   lint:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
       with:
         submodules: true
-    - uses: actions-rs/toolchain@v1
+    - uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
         components: rustfmt
-        profile: minimal
-    - uses: arduino/setup-protoc@v1
+    - uses: arduino/setup-protoc@v3
+      with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
     - uses: actions-rs/cargo@v1
       with:
         command: fmt
         args: --all -- --check
     - name: Lint
-      run: ./scripts/lint.sh
+      run: bash ./scripts/lint.sh
+  external-types:
+    strategy:
+      matrix:
+        example: [opentelemetry, opentelemetry-sdk, opentelemetry-otlp, opentelemetry-zipkin]
+    runs-on: ubuntu-latest # TODO: Check if this could be covered for Windows. The step used currently fails on Windows.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2024-05-01
+          components: rustfmt
+      - name: external-type-check
+        run: |
+          cargo install cargo-check-external-types
+          cd ${{ matrix.example }}
+          cargo check-external-types --config allowed-external-types.toml
   non-default-examples:
     strategy:
       matrix:
-        example: [opentelemetry-otlp/examples/external-otlp-grpcio-async-std, opentelemetry-otlp/examples/basic-otlp]
-    runs-on: ubuntu-latest
+        os: [ windows-latest, ubuntu-latest ]
+        example: [opentelemetry-otlp/examples/basic-otlp]
+    runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v4
       with:
         submodules: true
-    - uses: actions-rs/toolchain@v1
+    - uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
         components: rustfmt
-        profile: minimal
-    - uses: arduino/setup-protoc@v1
+    - uses: arduino/setup-protoc@v3
+      with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
     - name: Build
       run: |
         cd ${{ matrix.example }}
         cargo build --verbose
   msrv:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        rust: [1.70.0, 1.71.1]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
     steps:
-    - uses: actions/checkout@v1
-      with:
-        submodules: true
-    - uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: 1.64.0
-        override: true
-    - name: Patch dependencies versions # some dependencies bump MSRV without major version bump
-      run: ./scripts/patch_dependencies.sh
-    - name: Run tests
-      run: cargo --version &&
-        cargo test --manifest-path=opentelemetry/Cargo.toml --features trace,metrics,testing &&
-        cargo test --manifest-path=opentelemetry-jaeger/Cargo.toml --features rt-tokio &&
-        cargo test --manifest-path=opentelemetry-zipkin/Cargo.toml
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Set up Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - name: Patch dependencies versions
+        run: bash ./scripts/patch_dependencies.sh
+      - name: Check MSRV for all crates
+        run: bash ./scripts/msrv.sh ${{ matrix.rust }}
   cargo-deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # This uses the step `EmbarkStudios/cargo-deny-action@v1` which is only supported on Linux
     continue-on-error: true # Prevent sudden announcement of a new advisory from failing ci
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v1
         with:
           command: check advisories
@@ -91,13 +131,13 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly
           components: rustfmt
-          override: true
-      - uses: arduino/setup-protoc@v1
+      - uses: arduino/setup-protoc@v3
+        with:
+            repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: doc
         run: cargo doc --no-deps --all-features
         env:
@@ -106,16 +146,18 @@ jobs:
   coverage:
     continue-on-error: true
     runs-on: ubuntu-latest
+    if: ${{ ! contains(github.event.pull_request.labels.*.name, 'dependencies') }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           components: rustfmt,llvm-tools-preview
-          override: true
-      - uses: arduino/setup-protoc@v1
+      - uses: arduino/setup-protoc@v3
+        with:
+            repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: cargo install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: cargo generate-lockfile
@@ -124,6 +166,8 @@ jobs:
       - name: cargo llvm-cov
         run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           fail_ci_if_error: true

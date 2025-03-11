@@ -2,8 +2,49 @@
 
 ## vNext
 
+- Bump MSRV to 1.70 [#2179](https://github.com/open-telemetry/opentelemetry-rust/pull/2179)
+
+## v0.26.0
+Released 2024-Sep-30
+
+- Update `opentelemetry` dependency version to 0.26
+
+## v0.25.0
+
+- Update `opentelemetry` dependency version to 0.25
+- Starting with this version, this crate will align with `opentelemetry` crate
+  on major,minor versions.
+  
+## v0.13.0
+
+- **Breaking** Correct the misspelling of "webkpi" to "webpki" in features [#1842](https://github.com/open-telemetry/opentelemetry-rust/pull/1842)
+- **Breaking** Remove support for the `isahc` HTTP client [#1924](https://github.com/open-telemetry/opentelemetry-rust/pull/1924)
+- Update to `http` v1 [#1674](https://github.com/open-telemetry/opentelemetry-rust/pull/1674)
+- Update `opentelemetry` dependency version to 0.24
+
+## v0.12.0
+
+- Add `reqwest-rustls-webkpi-roots` feature flag to configure [`reqwest`](https://docs.rs/reqwest/0.11.27/reqwest/index.html#optional-features) to use embedded `webkpi-roots`.
+- Update `opentelemetry` dependency version to 0.23
+
+## v0.11.1
+
+- Add feature flag enabling users to configure `reqwest` usage to use rustls via
+  `reqwest/rustls-tls` feature flag
+  [1638](https://github.com/open-telemetry/opentelemetry-rust/pull/1638).
+
+## v0.11.0
+
 ### Changed
 
+- **Breaking** Remove built-in support for surf HTTP client [#1537](https://github.com/open-telemetry/opentelemetry-rust/pull/1537)
+- **Breaking** Surface non-2xx status codes as errors; change `ResponseExt` trait to return `HttpError` instead of `TraceError`[#1484](https://github.com/open-telemetry/opentelemetry-rust/pull/1484)
+
+## v0.10.0
+
+### Changed
+
+- Bump MSRV to 1.65 [#1318](https://github.com/open-telemetry/opentelemetry-rust/pull/1318)
 - Bump MSRV to 1.64 [#1203](https://github.com/open-telemetry/opentelemetry-rust/pull/1203)
 
 ## v0.9.0

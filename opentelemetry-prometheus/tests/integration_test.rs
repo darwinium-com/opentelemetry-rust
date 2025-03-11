@@ -1,12 +1,13 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use opentelemetry::metrics::{Meter, MeterProvider as _, Unit};
+use opentelemetry::metrics::{Meter, MeterProvider as _};
 use opentelemetry::Key;
 use opentelemetry::KeyValue;
-use opentelemetry_prometheus::ExporterBuilder;
-use opentelemetry_sdk::metrics::{new_view, Aggregation, Instrument, MeterProvider, Stream};
+use opentelemetry_prometheus::{ExporterBuilder, ResourceSelector};
+use opentelemetry_sdk::metrics::{new_view, Aggregation, Instrument, SdkMeterProvider, Stream};
 use opentelemetry_sdk::resource::{
     EnvResourceDetector, SdkProvidedResourceDetector, TelemetryResourceDetector,
 };
@@ -53,7 +54,7 @@ fn prometheus_exporter_integration() {
                 let counter = meter
                     .f64_counter("foo")
                     .with_description("a simple counter")
-                    .with_unit(Unit::new("ms"))
+                    .with_unit("ms")
                     .init();
                 counter.add(5.0, &attrs);
                 counter.add(10.3, &attrs);
@@ -82,7 +83,7 @@ fn prometheus_exporter_integration() {
                 let counter = meter
                     .f64_counter("foo")
                     .with_description("a simple counter without a total suffix")
-                    .with_unit(Unit::new("ms"))
+                    .with_unit("ms")
                     .init();
                 counter.add(5.0, &attrs);
                 counter.add(10.3, &attrs);
@@ -105,7 +106,7 @@ fn prometheus_exporter_integration() {
                 let gauge = meter
                     .f64_up_down_counter("bar")
                     .with_description("a fun little gauge")
-                    .with_unit(Unit::new("1"))
+                    .with_unit("1")
                     .init();
                 gauge.add(1.0, &attrs);
                 gauge.add(-0.25, &attrs);
@@ -120,7 +121,7 @@ fn prometheus_exporter_integration() {
                 let histogram = meter
                     .f64_histogram("histogram_baz")
                     .with_description("a very nice histogram")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .init();
                 histogram.record(23.0, &attrs);
                 histogram.record(7.0, &attrs);
@@ -146,7 +147,7 @@ fn prometheus_exporter_integration() {
                     .f64_counter("foo")
                     .with_description("a sanitary counter")
                     // This unit is not added to
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .init();
                 counter.add(5.0, &attrs);
                 counter.add(10.3, &attrs);
@@ -260,7 +261,7 @@ fn prometheus_exporter_integration() {
                 let gauge = meter
                     .i64_up_down_counter("bar")
                     .with_description("a fun little gauge")
-                    .with_unit(Unit::new("1"))
+                    .with_unit("1")
                     .init();
                 gauge.add(2, &attrs);
                 gauge.add(-1, &attrs);
@@ -278,7 +279,7 @@ fn prometheus_exporter_integration() {
                 let counter = meter
                     .u64_counter("bar")
                     .with_description("a fun little counter")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .init();
                 counter.add(2, &attrs);
                 counter.add(1, &attrs);
@@ -307,6 +308,39 @@ fn prometheus_exporter_integration() {
             }),
             ..Default::default()
         },
+        TestCase {
+            name: "with resource in every metrics",
+            builder: ExporterBuilder::default().with_resource_selector(ResourceSelector::All),
+            expected_file: "resource_in_every_metrics.txt",
+            record_metrics: Box::new(|meter| {
+                let attrs = vec![Key::new("A").string("B"), Key::new("C").string("D")];
+                let gauge = meter
+                    .i64_up_down_counter("bar")
+                    .with_description("a fun little gauge")
+                    .with_unit("1")
+                    .init();
+                gauge.add(2, &attrs);
+                gauge.add(-1, &attrs);
+            }),
+            ..Default::default()
+        },
+        TestCase {
+            name: "with select resource in every metrics",
+            builder: ExporterBuilder::default()
+                .with_resource_selector(HashSet::from([Key::new("service.name")])),
+            expected_file: "select_resource_in_every_metrics.txt",
+            record_metrics: Box::new(|meter| {
+                let attrs = vec![Key::new("A").string("B"), Key::new("C").string("D")];
+                let gauge = meter
+                    .i64_up_down_counter("bar")
+                    .with_description("a fun little gauge")
+                    .with_unit("1")
+                    .init();
+                gauge.add(2, &attrs);
+                gauge.add(-1, &attrs);
+            }),
+            ..Default::default()
+        },
     ];
 
     for tc in test_cases {
@@ -327,16 +361,16 @@ fn prometheus_exporter_integration() {
             .merge(&mut Resource::new(
                 vec![
                     // always specify service.name because the default depends on the running OS
-                    SERVICE_NAME.string("prometheus_test"),
+                    KeyValue::new(SERVICE_NAME, "prometheus_test"),
                     // Overwrite the semconv.TelemetrySDKVersionKey value so we don't need to update every version
-                    TELEMETRY_SDK_VERSION.string("latest"),
+                    KeyValue::new(TELEMETRY_SDK_VERSION, "latest"),
                 ]
                 .into_iter()
                 .chain(tc.custom_resource_attrs.into_iter()),
             ))
         };
 
-        let provider = MeterProvider::builder()
+        let provider = SdkMeterProvider::builder()
             .with_resource(res)
             .with_reader(exporter)
             .with_view(
@@ -352,8 +386,12 @@ fn prometheus_exporter_integration() {
                 .unwrap(),
             )
             .build();
-        let meter =
-            provider.versioned_meter("testmeter", Some("v0.1.0"), None::<&'static str>, None);
+        let meter = provider.versioned_meter(
+            "testmeter",
+            Some("v0.1.0"),
+            None::<&'static str>,
+            Some(vec![KeyValue::new("k", "v")]),
+        );
         (tc.record_metrics)(meter);
 
         let content = fs::read_to_string(Path::new("./tests/data").join(tc.expected_file))
@@ -367,9 +405,19 @@ fn gather_and_compare(registry: prometheus::Registry, expected: String, name: &'
     let encoder = TextEncoder::new();
     let metric_families = registry.gather();
     encoder.encode(&metric_families, &mut output).unwrap();
-    let output_string = String::from_utf8(output).unwrap();
+
+    let expected = get_platform_specific_string(expected);
+    let output_string = get_platform_specific_string(String::from_utf8(output).unwrap());
 
     assert_eq!(output_string, expected, "{name}");
+}
+
+///  Returns a String which uses the platform specific new line feed character.
+fn get_platform_specific_string(input: String) -> String {
+    if cfg!(windows) && !input.ends_with("\r\n") && input.ends_with('\n') {
+        return input.replace('\n', "\r\n");
+    }
+    input
 }
 
 #[test]
@@ -390,28 +438,38 @@ fn multiple_scopes() {
     )
     .merge(&mut Resource::new(vec![
         // always specify service.name because the default depends on the running OS
-        SERVICE_NAME.string("prometheus_test"),
+        KeyValue::new(SERVICE_NAME, "prometheus_test"),
         // Overwrite the semconv.TelemetrySDKVersionKey value so we don't need to update every version
-        TELEMETRY_SDK_VERSION.string("latest"),
+        KeyValue::new(TELEMETRY_SDK_VERSION, "latest"),
     ]));
 
-    let provider = MeterProvider::builder()
+    let provider = SdkMeterProvider::builder()
         .with_reader(exporter)
         .with_resource(resource)
         .build();
 
     let foo_counter = provider
-        .versioned_meter("meterfoo", Some("v0.1.0"), None::<&'static str>, None)
+        .versioned_meter(
+            "meterfoo",
+            Some("v0.1.0"),
+            None::<&'static str>,
+            Some(vec![KeyValue::new("k", "v")]),
+        )
         .u64_counter("foo")
-        .with_unit(Unit::new("ms"))
+        .with_unit("ms")
         .with_description("meter foo counter")
         .init();
     foo_counter.add(100, &[KeyValue::new("type", "foo")]);
 
     let bar_counter = provider
-        .versioned_meter("meterbar", Some("v0.1.0"), None::<&'static str>, None)
+        .versioned_meter(
+            "meterbar",
+            Some("v0.1.0"),
+            None::<&'static str>,
+            Some(vec![KeyValue::new("k", "v")]),
+        )
         .u64_counter("bar")
-        .with_unit(Unit::new("ms"))
+        .with_unit("ms")
         .with_description("meter bar counter")
         .init();
     bar_counter.add(200, &[KeyValue::new("type", "bar")]);
@@ -449,7 +507,7 @@ fn duplicate_metrics() {
             record_metrics: Box::new(|meter_a, meter_b| {
                 let foo_a = meter_a
                     .u64_counter("foo")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter counter foo")
                     .init();
 
@@ -457,7 +515,7 @@ fn duplicate_metrics() {
 
                 let foo_b = meter_b
                     .u64_counter("foo")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter counter foo")
                     .init();
 
@@ -471,7 +529,7 @@ fn duplicate_metrics() {
             record_metrics: Box::new(|meter_a, meter_b| {
                 let foo_a = meter_a
                     .i64_up_down_counter("foo")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter gauge foo")
                     .init();
 
@@ -479,7 +537,7 @@ fn duplicate_metrics() {
 
                 let foo_b = meter_b
                     .i64_up_down_counter("foo")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter gauge foo")
                     .init();
 
@@ -492,16 +550,16 @@ fn duplicate_metrics() {
             name: "no_conflict_two_histograms",
             record_metrics: Box::new(|meter_a, meter_b| {
                 let foo_a = meter_a
-                    .i64_histogram("foo")
-                    .with_unit(Unit::new("By"))
+                    .u64_histogram("foo")
+                    .with_unit("By")
                     .with_description("meter histogram foo")
                     .init();
 
                 foo_a.record(100, &[KeyValue::new("A", "B")]);
 
                 let foo_b = meter_b
-                    .i64_histogram("foo")
-                    .with_unit(Unit::new("By"))
+                    .u64_histogram("foo")
+                    .with_unit("By")
                     .with_description("meter histogram foo")
                     .init();
 
@@ -515,7 +573,7 @@ fn duplicate_metrics() {
             record_metrics: Box::new(|meter_a, meter_b| {
                 let bar_a = meter_a
                     .u64_counter("bar")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter a bar")
                     .init();
 
@@ -523,7 +581,7 @@ fn duplicate_metrics() {
 
                 let bar_b = meter_b
                     .u64_counter("bar")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter b bar")
                     .init();
 
@@ -540,7 +598,7 @@ fn duplicate_metrics() {
             record_metrics: Box::new(|meter_a, meter_b| {
                 let bar_a = meter_a
                     .i64_up_down_counter("bar")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter a bar")
                     .init();
 
@@ -548,7 +606,7 @@ fn duplicate_metrics() {
 
                 let bar_b = meter_b
                     .i64_up_down_counter("bar")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter b bar")
                     .init();
 
@@ -564,16 +622,16 @@ fn duplicate_metrics() {
             name: "conflict_help_two_histograms",
             record_metrics: Box::new(|meter_a, meter_b| {
                 let bar_a = meter_a
-                    .i64_histogram("bar")
-                    .with_unit(Unit::new("By"))
+                    .u64_histogram("bar")
+                    .with_unit("By")
                     .with_description("meter a bar")
                     .init();
 
                 bar_a.record(100, &[KeyValue::new("A", "B")]);
 
                 let bar_b = meter_b
-                    .i64_histogram("bar")
-                    .with_unit(Unit::new("By"))
+                    .u64_histogram("bar")
+                    .with_unit("By")
                     .with_description("meter b bar")
                     .init();
 
@@ -590,7 +648,7 @@ fn duplicate_metrics() {
             record_metrics: Box::new(|meter_a, meter_b| {
                 let baz_a = meter_a
                     .u64_counter("bar")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter bar")
                     .init();
 
@@ -598,7 +656,7 @@ fn duplicate_metrics() {
 
                 let baz_b = meter_b
                     .u64_counter("bar")
-                    .with_unit(Unit::new("ms"))
+                    .with_unit("ms")
                     .with_description("meter bar")
                     .init();
 
@@ -613,7 +671,7 @@ fn duplicate_metrics() {
             record_metrics: Box::new(|meter_a, meter_b| {
                 let bar_a = meter_a
                     .i64_up_down_counter("bar")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter gauge bar")
                     .init();
 
@@ -621,7 +679,7 @@ fn duplicate_metrics() {
 
                 let bar_b = meter_b
                     .i64_up_down_counter("bar")
-                    .with_unit(Unit::new("ms"))
+                    .with_unit("ms")
                     .with_description("meter gauge bar")
                     .init();
 
@@ -635,16 +693,16 @@ fn duplicate_metrics() {
             name: "conflict_unit_two_histograms",
             record_metrics: Box::new(|meter_a, meter_b| {
                 let bar_a = meter_a
-                    .i64_histogram("bar")
-                    .with_unit(Unit::new("By"))
+                    .u64_histogram("bar")
+                    .with_unit("By")
                     .with_description("meter histogram bar")
                     .init();
 
                 bar_a.record(100, &[KeyValue::new("A", "B")]);
 
                 let bar_b = meter_b
-                    .i64_histogram("bar")
-                    .with_unit(Unit::new("ms"))
+                    .u64_histogram("bar")
+                    .with_unit("ms")
                     .with_description("meter histogram bar")
                     .init();
 
@@ -659,7 +717,7 @@ fn duplicate_metrics() {
             record_metrics: Box::new(|meter_a, _meter_b| {
                 let counter = meter_a
                     .u64_counter("foo")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter foo")
                     .init();
 
@@ -667,7 +725,7 @@ fn duplicate_metrics() {
 
                 let gauge = meter_a
                     .i64_up_down_counter("foo_total")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter foo")
                     .init();
 
@@ -685,15 +743,15 @@ fn duplicate_metrics() {
             record_metrics: Box::new(|meter_a, _meter_b| {
                 let foo_a = meter_a
                     .i64_up_down_counter("foo")
-                    .with_unit(Unit::new("By"))
+                    .with_unit("By")
                     .with_description("meter gauge foo")
                     .init();
 
                 foo_a.add(100, &[KeyValue::new("A", "B")]);
 
                 let foo_histogram_a = meter_a
-                    .i64_histogram("foo")
-                    .with_unit(Unit::new("By"))
+                    .u64_histogram("foo")
+                    .with_unit("By")
                     .with_description("meter histogram foo")
                     .init();
 
@@ -722,21 +780,31 @@ fn duplicate_metrics() {
         .merge(&mut Resource::new(
             vec![
                 // always specify service.name because the default depends on the running OS
-                SERVICE_NAME.string("prometheus_test"),
+                KeyValue::new(SERVICE_NAME, "prometheus_test"),
                 // Overwrite the semconv.TelemetrySDKVersionKey value so we don't need to update every version
-                TELEMETRY_SDK_VERSION.string("latest"),
+                KeyValue::new(TELEMETRY_SDK_VERSION, "latest"),
             ]
             .into_iter()
             .chain(tc.custom_resource_attrs.into_iter()),
         ));
 
-        let provider = MeterProvider::builder()
+        let provider = SdkMeterProvider::builder()
             .with_resource(resource)
             .with_reader(exporter)
             .build();
 
-        let meter_a = provider.versioned_meter("ma", Some("v0.1.0"), None::<&'static str>, None);
-        let meter_b = provider.versioned_meter("mb", Some("v0.1.0"), None::<&'static str>, None);
+        let meter_a = provider.versioned_meter(
+            "ma",
+            Some("v0.1.0"),
+            None::<&'static str>,
+            Some(vec![KeyValue::new("k", "v")]),
+        );
+        let meter_b = provider.versioned_meter(
+            "mb",
+            Some("v0.1.0"),
+            None::<&'static str>,
+            Some(vec![KeyValue::new("k", "v")]),
+        );
 
         (tc.record_metrics)(meter_a, meter_b);
 
@@ -744,6 +812,7 @@ fn duplicate_metrics() {
             .expected_files
             .into_iter()
             .map(|f| fs::read_to_string(Path::new("./tests/data").join(f)).expect(f))
+            .map(get_platform_specific_string)
             .collect();
         gather_and_compare_multi(registry, possible_matches, tc.name);
     }
@@ -758,7 +827,8 @@ fn gather_and_compare_multi(
     let encoder = TextEncoder::new();
     let metric_families = registry.gather();
     encoder.encode(&metric_families, &mut output).unwrap();
-    let output_string = String::from_utf8(output).unwrap();
+
+    let output_string = get_platform_specific_string(String::from_utf8(output).unwrap());
 
     assert!(
         expected.contains(&output_string),

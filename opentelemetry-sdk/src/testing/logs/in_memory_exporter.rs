@@ -1,6 +1,10 @@
-use crate::export::logs::{LogData, LogExporter};
+use crate::export::logs::{LogBatch, LogExporter};
+use crate::logs::LogRecord;
+use crate::Resource;
 use async_trait::async_trait;
 use opentelemetry::logs::{LogError, LogResult};
+use opentelemetry::InstrumentationLibrary;
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
 
 /// An in-memory logs exporter that stores logs data in memory..
@@ -35,13 +39,36 @@ use std::sync::{Arc, Mutex};
 ///
 #[derive(Clone, Debug)]
 pub struct InMemoryLogsExporter {
-    logs: Arc<Mutex<Vec<LogData>>>,
+    logs: Arc<Mutex<Vec<OwnedLogData>>>,
+    resource: Arc<Mutex<Resource>>,
+    should_reset_on_shutdown: bool,
 }
 
 impl Default for InMemoryLogsExporter {
     fn default() -> Self {
         InMemoryLogsExporterBuilder::new().build()
     }
+}
+
+/// `OwnedLogData` represents a single log event without resource context.
+#[derive(Debug, Clone)]
+pub struct OwnedLogData {
+    /// Log record, which can be borrowed or owned.
+    pub record: LogRecord,
+    /// Instrumentation details for the emitter who produced this `LogEvent`.
+    pub instrumentation: InstrumentationLibrary,
+}
+
+/// `LogDataWithResource` associates a [`LogRecord`] with a [`Resource`] and
+/// [`InstrumentationLibrary`].
+#[derive(Clone, Debug)]
+pub struct LogDataWithResource {
+    /// Log record
+    pub record: LogRecord,
+    /// Instrumentation details for the emitter who produced this `LogData`.
+    pub instrumentation: InstrumentationLibrary,
+    /// Resource for the emitter who produced this `LogData`.
+    pub resource: Cow<'static, Resource>,
 }
 
 ///Builder for ['InMemoryLogsExporter'].
@@ -71,7 +98,9 @@ impl Default for InMemoryLogsExporter {
 /// ```
 ///
 #[derive(Debug, Clone)]
-pub struct InMemoryLogsExporterBuilder {}
+pub struct InMemoryLogsExporterBuilder {
+    reset_on_shutdown: bool,
+}
 
 impl Default for InMemoryLogsExporterBuilder {
     fn default() -> Self {
@@ -83,7 +112,9 @@ impl InMemoryLogsExporterBuilder {
     /// Creates a new instance of `InMemoryLogsExporter`.
     ///
     pub fn new() -> Self {
-        Self {}
+        Self {
+            reset_on_shutdown: true,
+        }
     }
 
     /// Creates a new instance of `InMemoryLogsExporter`.
@@ -91,6 +122,16 @@ impl InMemoryLogsExporterBuilder {
     pub fn build(&self) -> InMemoryLogsExporter {
         InMemoryLogsExporter {
             logs: Arc::new(Mutex::new(Vec::new())),
+            resource: Arc::new(Mutex::new(Resource::default())),
+            should_reset_on_shutdown: self.reset_on_shutdown,
+        }
+    }
+
+    /// If set, the records will not be [`InMemoryLogsExporter::reset`] on shutdown.
+    #[cfg(test)]
+    pub(crate) fn keep_records_on_shutdown(self) -> Self {
+        Self {
+            reset_on_shutdown: false,
         }
     }
 }
@@ -107,13 +148,20 @@ impl InMemoryLogsExporter {
     /// let emitted_logs = exporter.get_emitted_logs().unwrap();
     /// ```
     ///
-    pub fn get_emitted_logs(&self) -> LogResult<Vec<LogData>> {
-        self.logs
-            .lock()
-            .map(|logs_guard| logs_guard.iter().cloned().collect())
-            .map_err(LogError::from)
-    }
+    pub fn get_emitted_logs(&self) -> LogResult<Vec<LogDataWithResource>> {
+        let logs_guard = self.logs.lock().map_err(LogError::from)?;
+        let resource_guard = self.resource.lock().map_err(LogError::from)?;
+        let logs: Vec<LogDataWithResource> = logs_guard
+            .iter()
+            .map(|log_data| LogDataWithResource {
+                record: log_data.record.clone(),
+                resource: Cow::Owned(resource_guard.clone()),
+                instrumentation: log_data.instrumentation.clone(),
+            })
+            .collect();
 
+        Ok(logs)
+    }
     /// Clears the internal (in-memory) storage of logs.
     ///
     /// # Example
@@ -136,13 +184,26 @@ impl InMemoryLogsExporter {
 
 #[async_trait]
 impl LogExporter for InMemoryLogsExporter {
-    async fn export(&mut self, batch: Vec<LogData>) -> LogResult<()> {
-        self.logs
-            .lock()
-            .map(|mut logs_guard| logs_guard.append(&mut batch.clone()))
-            .map_err(LogError::from)
+    async fn export(&mut self, batch: LogBatch<'_>) -> LogResult<()> {
+        let mut logs_guard = self.logs.lock().map_err(LogError::from)?;
+        for (log_record, instrumentation) in batch.iter() {
+            let owned_log = OwnedLogData {
+                record: (*log_record).clone(),
+                instrumentation: (*instrumentation).clone(),
+            };
+            logs_guard.push(owned_log);
+        }
+        Ok(())
     }
+
     fn shutdown(&mut self) {
-        self.reset();
+        if self.should_reset_on_shutdown {
+            self.reset();
+        }
+    }
+
+    fn set_resource(&mut self, resource: &Resource) {
+        let mut res_guard = self.resource.lock().expect("Resource lock poisoned");
+        *res_guard = resource.clone();
     }
 }

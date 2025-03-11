@@ -1,16 +1,11 @@
-use std::{
-    collections::HashMap,
-    f64::consts::LOG2_E,
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, f64::consts::LOG2_E, sync::Mutex, time::SystemTime};
 
 use once_cell::sync::Lazy;
-use opentelemetry::metrics::MetricsError;
+use opentelemetry::{metrics::MetricsError, KeyValue};
 
 use crate::{
     metrics::data::{self, Aggregation, Temporality},
-    AttributeSet,
+    metrics::AttributeSet,
 };
 
 use super::Number;
@@ -37,7 +32,7 @@ struct ExpoHistogramDataPoint<T> {
     zero_count: u64,
 }
 
-impl<T: Number<T>> ExpoHistogramDataPoint<T> {
+impl<T: Number> ExpoHistogramDataPoint<T> {
     fn new(max_size: i32, max_scale: i8, record_min_max: bool, record_sum: bool) -> Self {
         ExpoHistogramDataPoint {
             count: 0,
@@ -55,7 +50,7 @@ impl<T: Number<T>> ExpoHistogramDataPoint<T> {
     }
 }
 
-impl<T: Number<T>> ExpoHistogramDataPoint<T> {
+impl<T: Number> ExpoHistogramDataPoint<T> {
     /// Adds a new measurement to the histogram.
     ///
     /// It will rescale the buckets if needed.
@@ -327,7 +322,7 @@ pub(crate) struct ExpoHistogram<T> {
     start: Mutex<SystemTime>,
 }
 
-impl<T: Number<T>> ExpoHistogram<T> {
+impl<T: Number> ExpoHistogram<T> {
     /// Create a new exponential histogram.
     pub(crate) fn new(
         max_size: u32,
@@ -345,13 +340,14 @@ impl<T: Number<T>> ExpoHistogram<T> {
         }
     }
 
-    pub(crate) fn measure(&self, value: T, attrs: AttributeSet) {
+    pub(crate) fn measure(&self, value: T, attrs: &[KeyValue]) {
         let f_value = value.into_float();
         // Ignore NaN and infinity.
         if f_value.is_infinite() || f_value.is_nan() {
             return;
         }
 
+        let attrs: AttributeSet = attrs.into();
         if let Ok(mut values) = self.values.lock() {
             let v = values.entry(attrs).or_insert_with(|| {
                 ExpoHistogramDataPoint::new(
@@ -387,6 +383,7 @@ impl<T: Number<T>> ExpoHistogram<T> {
         };
         let h = h.unwrap_or_else(|| new_agg.as_mut().expect("present if h is none"));
         h.temporality = Temporality::Delta;
+        h.data_points.clear();
 
         let mut values = match self.values.lock() {
             Ok(g) => g,
@@ -395,62 +392,42 @@ impl<T: Number<T>> ExpoHistogram<T> {
 
         let n = values.len();
         if n > h.data_points.capacity() {
-            h.data_points.reserve(n - h.data_points.capacity());
+            h.data_points.reserve_exact(n - h.data_points.capacity());
         }
 
-        for (i, (a, mut b)) in values.drain().enumerate() {
-            let el = match h.data_points.get_mut(i) {
-                Some(el) => el,
-                None => {
-                    h.data_points.push(data::ExponentialHistogramDataPoint {
-                        attributes: AttributeSet::default(),
-                        start_time: UNIX_EPOCH,
-                        time: UNIX_EPOCH,
-                        count: 0,
-                        min: None,
-                        max: None,
-                        sum: T::default(),
-                        scale: 0,
-                        zero_count: 0,
-                        positive_bucket: data::ExponentialBucket {
-                            offset: 0,
-                            counts: vec![],
-                        },
-                        negative_bucket: data::ExponentialBucket {
-                            offset: 0,
-                            counts: vec![],
-                        },
-                        zero_threshold: 0.0,
-                        exemplars: vec![],
-                    });
-                    h.data_points.get_mut(i).unwrap()
-                }
-            };
-            el.attributes = a;
-            el.start_time = start;
-            el.time = t;
-            el.count = b.count;
-            el.scale = b.scale;
-            el.zero_count = b.zero_count;
-            el.zero_threshold = 0.0;
-
-            el.positive_bucket.offset = b.pos_buckets.start_bin;
-            el.positive_bucket.counts.clear();
-            el.positive_bucket.counts.append(&mut b.pos_buckets.counts);
-
-            el.negative_bucket.offset = b.neg_buckets.start_bin;
-            el.negative_bucket.counts.clear();
-            el.negative_bucket.counts.append(&mut b.neg_buckets.counts);
-
-            el.sum = if self.record_sum { b.sum } else { T::default() };
-
-            if self.record_min_max {
-                el.min = Some(b.min);
-                el.max = Some(b.max);
-            } else {
-                el.min = None;
-                el.max = None;
-            }
+        for (a, b) in values.drain() {
+            h.data_points.push(data::ExponentialHistogramDataPoint {
+                attributes: a
+                    .iter()
+                    .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+                    .collect(),
+                start_time: start,
+                time: t,
+                count: b.count,
+                min: if self.record_min_max {
+                    Some(b.min)
+                } else {
+                    None
+                },
+                max: if self.record_min_max {
+                    Some(b.max)
+                } else {
+                    None
+                },
+                sum: if self.record_sum { b.sum } else { T::default() },
+                scale: b.scale,
+                zero_count: b.zero_count,
+                positive_bucket: data::ExponentialBucket {
+                    offset: b.pos_buckets.start_bin,
+                    counts: b.pos_buckets.counts.clone(),
+                },
+                negative_bucket: data::ExponentialBucket {
+                    offset: b.neg_buckets.start_bin,
+                    counts: b.neg_buckets.counts.clone(),
+                },
+                zero_threshold: 0.0,
+                exemplars: vec![],
+            });
         }
 
         // The delta collection cycle resets.
@@ -488,71 +465,50 @@ impl<T: Number<T>> ExpoHistogram<T> {
             Ok(g) => g,
             Err(_) => return (0, None),
         };
+        h.data_points.clear();
 
         let n = values.len();
         if n > h.data_points.capacity() {
-            h.data_points.reserve(n - h.data_points.capacity());
+            h.data_points.reserve_exact(n - h.data_points.capacity());
         }
 
         // TODO: This will use an unbounded amount of memory if there
         // are unbounded number of attribute sets being aggregated. Attribute
         // sets that become "stale" need to be forgotten so this will not
         // overload the system.
-        for (i, (a, b)) in values.iter().enumerate() {
-            let el = match h.data_points.get_mut(i) {
-                Some(el) => el,
-                None => {
-                    h.data_points.push(data::ExponentialHistogramDataPoint {
-                        attributes: AttributeSet::default(),
-                        start_time: UNIX_EPOCH,
-                        time: UNIX_EPOCH,
-                        count: 0,
-                        min: None,
-                        max: None,
-                        sum: T::default(),
-                        scale: 0,
-                        zero_count: 0,
-                        positive_bucket: data::ExponentialBucket {
-                            offset: 0,
-                            counts: vec![],
-                        },
-                        negative_bucket: data::ExponentialBucket {
-                            offset: 0,
-                            counts: vec![],
-                        },
-                        zero_threshold: 0.0,
-                        exemplars: vec![],
-                    });
-                    h.data_points.get_mut(i).unwrap()
-                }
-            };
-            el.attributes = a.clone();
-            el.start_time = start;
-            el.time = t;
-            el.count = b.count;
-            el.scale = b.scale;
-            el.zero_count = b.zero_count;
-            el.zero_threshold = 0.0;
-
-            el.positive_bucket.offset = b.pos_buckets.start_bin;
-            el.positive_bucket.counts.clear();
-            el.positive_bucket
-                .counts
-                .extend_from_slice(&b.pos_buckets.counts);
-
-            el.negative_bucket.offset = b.neg_buckets.start_bin;
-            el.negative_bucket.counts.clear();
-            el.negative_bucket
-                .counts
-                .extend_from_slice(&b.neg_buckets.counts);
-
-            if self.record_sum {
-                el.sum = b.sum;
-            }
-            if self.record_min_max {
-                el.min = Some(b.min);
-                el.max = Some(b.max);
-            }
+        for (a, b) in values.iter() {
+            h.data_points.push(data::ExponentialHistogramDataPoint {
+                attributes: a
+                    .iter()
+                    .map(|(k, v)| KeyValue::new(k.clone(), v.clone()))
+                    .collect(),
+                start_time: start,
+                time: t,
+                count: b.count,
+                min: if self.record_min_max {
+                    Some(b.min)
+                } else {
+                    None
+                },
+                max: if self.record_min_max {
+                    Some(b.max)
+                } else {
+                    None
+                },
+                sum: if self.record_sum { b.sum } else { T::default() },
+                scale: b.scale,
+                zero_count: b.zero_count,
+                positive_bucket: data::ExponentialBucket {
+                    offset: b.pos_buckets.start_bin,
+                    counts: b.pos_buckets.counts.clone(),
+                },
+                negative_bucket: data::ExponentialBucket {
+                    offset: b.neg_buckets.start_bin,
+                    counts: b.neg_buckets.counts.clone(),
+                },
+                zero_threshold: 0.0,
+                exemplars: vec![],
+            });
         }
 
         (n, new_agg.map(|a| Box::new(a) as Box<_>))
@@ -579,7 +535,7 @@ mod tests {
         run_data_point_record::<i64>();
     }
 
-    fn run_data_point_record<T: Number<T> + Neg<Output = T> + From<u32>>() {
+    fn run_data_point_record<T: Number + Neg<Output = T> + From<u32>>() {
         struct TestCase<T> {
             max_size: i32,
             values: Vec<T>,
@@ -678,7 +634,7 @@ mod tests {
     }
 
     fn run_min_max_sum_f64() {
-        let alice = AttributeSet::from(&[KeyValue::new("user", "alice")][..]);
+        let alice = &[KeyValue::new("user", "alice")][..];
         struct Expected {
             min: f64,
             max: f64,
@@ -726,9 +682,10 @@ mod tests {
         for test in test_cases {
             let h = ExpoHistogram::new(4, 20, true, true);
             for v in test.values {
-                h.measure(v, alice.clone());
+                h.measure(v, alice);
             }
             let values = h.values.lock().unwrap();
+            let alice: AttributeSet = alice.into();
             let dp = values.get(&alice).unwrap();
 
             assert_eq!(test.expected.max, dp.max);
@@ -738,15 +695,15 @@ mod tests {
         }
     }
 
-    fn run_min_max_sum<T: Number<T> + From<u32>>() {
-        let alice = AttributeSet::from(&[KeyValue::new("user", "alice")][..]);
+    fn run_min_max_sum<T: Number + From<u32>>() {
+        let alice = &[KeyValue::new("user", "alice")][..];
         struct Expected<T> {
             min: T,
             max: T,
             sum: T,
             count: usize,
         }
-        impl<T: Number<T>> Expected<T> {
+        impl<T: Number> Expected<T> {
             fn new(min: T, max: T, sum: T, count: usize) -> Self {
                 Expected {
                     min,
@@ -777,9 +734,10 @@ mod tests {
         for test in test_cases {
             let h = ExpoHistogram::new(4, 20, true, true);
             for v in test.values {
-                h.measure(v, alice.clone());
+                h.measure(v, alice);
             }
             let values = h.values.lock().unwrap();
+            let alice: AttributeSet = alice.into();
             let dp = values.get(&alice).unwrap();
 
             assert_eq!(test.expected.max, dp.max);
@@ -1271,7 +1229,7 @@ mod tests {
         (Box::new(m), Box::new(ca))
     }
 
-    fn hist_aggregation<T: Number<T> + From<u32>>() {
+    fn hist_aggregation<T: Number + From<u32>>() {
         let max_size = 4;
         let max_scale = 20;
         let record_min_max = true;
@@ -1311,7 +1269,7 @@ mod tests {
                 want: data::ExponentialHistogram {
                     temporality: Temporality::Delta,
                     data_points: vec![data::ExponentialHistogramDataPoint {
-                        attributes: AttributeSet::default(),
+                        attributes: vec![],
                         count: 6,
                         min: Some(1.into()),
                         max: Some(16.into()),
@@ -1354,7 +1312,7 @@ mod tests {
                 want: data::ExponentialHistogram {
                     temporality: Temporality::Cumulative,
                     data_points: vec![data::ExponentialHistogramDataPoint {
-                        attributes: AttributeSet::default(),
+                        attributes: vec![],
                         count: 6,
                         min: Some(1.into()),
                         max: Some(16.into()),
@@ -1400,7 +1358,7 @@ mod tests {
                 want: data::ExponentialHistogram {
                     temporality: Temporality::Delta,
                     data_points: vec![data::ExponentialHistogramDataPoint {
-                        attributes: AttributeSet::default(),
+                        attributes: vec![],
                         count: 6,
                         min: Some(1.into()),
                         max: Some(16.into()),
@@ -1455,7 +1413,7 @@ mod tests {
                             offset: -1,
                             counts: vec![1, 6, 2],
                         },
-                        attributes: AttributeSet::default(),
+                        attributes: vec![],
                         start_time: SystemTime::now(),
                         time: SystemTime::now(),
                         negative_bucket: data::ExponentialBucket {
@@ -1481,7 +1439,7 @@ mod tests {
             let mut count = 0;
             for n in test.input {
                 for v in n {
-                    in_fn.call(v, AttributeSet::default())
+                    in_fn.call(v, &[])
                 }
                 count = out_fn.call(Some(got.as_mut())).0
             }
@@ -1491,7 +1449,7 @@ mod tests {
         }
     }
 
-    fn assert_aggregation_eq<T: Number<T> + PartialEq>(
+    fn assert_aggregation_eq<T: Number + PartialEq>(
         a: Box<dyn Aggregation>,
         b: Box<dyn Aggregation>,
         ignore_timestamp: bool,
@@ -1600,7 +1558,7 @@ mod tests {
         }
     }
 
-    fn assert_data_points_eq<T: Number<T>>(
+    fn assert_data_points_eq<T: Number>(
         a: &data::DataPoint<T>,
         b: &data::DataPoint<T>,
         ignore_timestamp: bool,
@@ -1624,7 +1582,7 @@ mod tests {
         }
     }
 
-    fn assert_hist_data_points_eq<T: Number<T>>(
+    fn assert_hist_data_points_eq<T: Number>(
         a: &data::HistogramDataPoint<T>,
         b: &data::HistogramDataPoint<T>,
         ignore_timestamp: bool,
@@ -1657,7 +1615,7 @@ mod tests {
         }
     }
 
-    fn assert_exponential_hist_data_points_eq<T: Number<T>>(
+    fn assert_exponential_hist_data_points_eq<T: Number>(
         a: &data::ExponentialHistogramDataPoint<T>,
         b: &data::ExponentialHistogramDataPoint<T>,
         ignore_timestamp: bool,

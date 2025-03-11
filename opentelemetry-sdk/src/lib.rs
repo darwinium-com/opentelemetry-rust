@@ -1,6 +1,6 @@
 //! Implements the [`SDK`] component of [OpenTelemetry].
 //!
-//! *Compiler support: [requires `rustc` 1.64+][msrv]*
+//! *Compiler support: [requires `rustc` 1.70+][msrv]*
 //!
 //! [`SDK`]: https://opentelemetry.io/docs/specs/otel/overview/#sdk
 //! [OpenTelemetry]: https://opentelemetry.io/docs/what-is-opentelemetry/
@@ -44,7 +44,7 @@
 //! [examples]: https://github.com/open-telemetry/opentelemetry-rust/tree/main/examples
 //! [`trace`]: https://docs.rs/opentelemetry/latest/opentelemetry/trace/index.html
 //!
-//! # Metrics (Beta)
+//! # Metrics (Alpha)
 //!
 //! Note: the metrics implementation is **still in progress** and **subject to major
 //! changes**.
@@ -77,13 +77,22 @@
 //!
 //! ## Crate Feature Flags
 //!
-//! The following core crate feature flags are available:
+//! The following feature flags can used to control the telemetry signals to use:
 //!
 //! * `trace`: Includes the trace SDK (enabled by default).
-//! * `metrics`: Includes the unstable metrics SDK.
+//! * `metrics`: Includes the metrics SDK.
+//! * `logs`: Includes the logs SDK.
 //!
-//! Support for recording and exporting telemetry asynchronously can be added
-//! via the following flags:
+//! For `trace` the following feature flags are available:
+//!
+//! * `jaeger_remote_sampler`: Enables the [Jaeger remote sampler](https://www.jaegertracing.io/docs/1.53/sampling/).
+//!
+//! For `logs` the following feature flags are available:
+//!
+//! * `logs_level_enabled`: control the log level
+//!
+//! Support for recording and exporting telemetry asynchronously and perform
+//! metrics aggregation can be added via the following flags:
 //!
 //! * `rt-tokio`: Spawn telemetry tasks using [tokio]'s multi-thread runtime.
 //! * `rt-tokio-current-thread`: Spawn telemetry tasks on a separate runtime so that the main runtime won't be blocked.
@@ -111,8 +120,8 @@
 )]
 #![cfg_attr(test, deny(warnings))]
 
-pub(crate) mod attributes;
 pub mod export;
+pub(crate) mod growable_array;
 mod instrumentation;
 #[cfg(feature = "logs")]
 #[cfg_attr(docsrs, doc(cfg(feature = "logs")))]
@@ -126,8 +135,10 @@ pub mod propagation;
 pub mod resource;
 pub mod runtime;
 #[cfg(any(feature = "testing", test))]
-#[doc(hidden)]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "testing", test))))]
 pub mod testing;
+
+#[allow(deprecated)]
 #[cfg(feature = "trace")]
 #[cfg_attr(docsrs, doc(cfg(feature = "trace")))]
 pub mod trace;
@@ -135,7 +146,6 @@ pub mod trace;
 #[doc(hidden)]
 pub mod util;
 
-pub use attributes::*;
 pub use instrumentation::{InstrumentationLibrary, Scope};
 #[doc(inline)]
 pub use resource::Resource;

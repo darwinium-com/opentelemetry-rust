@@ -51,12 +51,10 @@
 //!     let tracer_provider = global::tracer_provider();
 //!
 //!     // Get a tracer for this library
-//!     let tracer = tracer_provider.versioned_tracer(
-//!         "my_name",
-//!         Some(env!("CARGO_PKG_VERSION")),
-//!         Some("https://opentelemetry.io/schemas/1.17.0"),
-//!         None
-//!     );
+//!     let tracer = tracer_provider.tracer_builder("my_name").
+//!         with_version(env!("CARGO_PKG_VERSION")).
+//!         with_schema_url("https://opentelemetry.io/schemas/1.17.0").
+//!         build();
 //!
 //!     // Create spans
 //!     let mut span = tracer.start("doing_work");
@@ -151,6 +149,7 @@
 //! use opentelemetry::{Context, global, trace::{FutureExt, TraceContextExt, Tracer}};
 //!
 //! async fn some_work() { }
+//! # async fn in_an_async_context() {
 //!
 //! // Get a tracer
 //! let tracer = global::tracer("my_tracer");
@@ -159,7 +158,8 @@
 //! let span = tracer.start("my_span");
 //!
 //! // Perform some async work with this span as the currently active parent.
-//! some_work().with_context(Context::current_with_span(span));
+//! some_work().with_context(Context::current_with_span(span)).await;
+//! # }
 //! ```
 
 use std::borrow::Cow;
@@ -183,11 +183,7 @@ pub use self::{
     tracer_provider::TracerProvider,
 };
 use crate::{ExportError, KeyValue};
-use std::collections::hash_map::RandomState;
 use std::sync::PoisonError;
-
-/// re-export OrderMap to mitigate breaking change
-pub type OrderMap<K, V, S = RandomState> = crate::order_map::OrderMap<K, V, S>;
 
 /// Describe the result of operations in tracing API.
 pub type TraceResult<T> = Result<T, TraceError>;
@@ -304,11 +300,24 @@ pub struct Link {
 }
 
 impl Link {
-    /// Create a new link.
-    pub fn new(span_context: SpanContext, attributes: Vec<KeyValue>) -> Self {
+    /// Create new `Link`
+    pub fn new(
+        span_context: SpanContext,
+        attributes: Vec<KeyValue>,
+        dropped_attributes_count: u32,
+    ) -> Self {
         Link {
             span_context,
             attributes,
+            dropped_attributes_count,
+        }
+    }
+
+    /// Create new `Link` with given context
+    pub fn with_context(span_context: SpanContext) -> Self {
+        Link {
+            span_context,
+            attributes: Vec::new(),
             dropped_attributes_count: 0,
         }
     }

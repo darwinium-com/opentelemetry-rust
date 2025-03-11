@@ -2,9 +2,9 @@
 
 use std::{any, borrow::Cow, fmt, time::SystemTime};
 
-use opentelemetry::{metrics::Unit, KeyValue};
+use opentelemetry::KeyValue;
 
-use crate::{attributes::AttributeSet, instrumentation::Scope, Resource};
+use crate::{instrumentation::Scope, Resource};
 
 pub use self::temporality::Temporality;
 
@@ -38,7 +38,7 @@ pub struct Metric {
     /// The description of the instrument, which can be used in documentation.
     pub description: Cow<'static, str>,
     /// The unit in which the instrument reports.
-    pub unit: Unit,
+    pub unit: Cow<'static, str>,
     /// The aggregated data from an instrument.
     pub data: Box<dyn Aggregation>,
 }
@@ -93,11 +93,11 @@ impl<T: fmt::Debug + Send + Sync + 'static> Aggregation for Sum<T> {
 }
 
 /// DataPoint is a single data point in a time series.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct DataPoint<T> {
     /// Attributes is the set of key value pairs that uniquely identify the
     /// time series.
-    pub attributes: AttributeSet,
+    pub attributes: Vec<KeyValue>,
     /// The time when the time series was started.
     pub start_time: Option<SystemTime>,
     /// The time when the time series was recorded.
@@ -140,10 +140,10 @@ impl<T: fmt::Debug + Send + Sync + 'static> Aggregation for Histogram<T> {
 }
 
 /// A single histogram data point in a time series.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct HistogramDataPoint<T> {
     /// The set of key value pairs that uniquely identify the time series.
-    pub attributes: AttributeSet,
+    pub attributes: Vec<KeyValue>,
     /// The time when the time series was started.
     pub start_time: SystemTime,
     /// The time when the time series was recorded.
@@ -207,10 +207,10 @@ impl<T: fmt::Debug + Send + Sync + 'static> Aggregation for ExponentialHistogram
 }
 
 /// A single exponential histogram data point in a time series.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ExponentialHistogramDataPoint<T> {
     /// The set of key value pairs that uniquely identify the time series.
-    pub attributes: AttributeSet,
+    pub attributes: Vec<KeyValue>,
     /// When the time series was started.
     pub start_time: SystemTime,
     /// The time when the time series was recorded.
@@ -255,6 +255,26 @@ pub struct ExponentialHistogramDataPoint<T> {
     pub exemplars: Vec<Exemplar<T>>,
 }
 
+impl<T: Copy> Clone for ExponentialHistogramDataPoint<T> {
+    fn clone(&self) -> Self {
+        Self {
+            attributes: self.attributes.clone(),
+            start_time: self.start_time,
+            time: self.time,
+            count: self.count,
+            min: self.min,
+            max: self.max,
+            sum: self.sum,
+            scale: self.scale,
+            zero_count: self.zero_count,
+            positive_bucket: self.positive_bucket.clone(),
+            negative_bucket: self.negative_bucket.clone(),
+            zero_threshold: self.zero_threshold,
+            exemplars: self.exemplars.clone(),
+        }
+    }
+}
+
 /// A set of bucket counts, encoded in a contiguous array of counts.
 #[derive(Debug, PartialEq)]
 pub struct ExponentialBucket {
@@ -268,8 +288,17 @@ pub struct ExponentialBucket {
     pub counts: Vec<u64>,
 }
 
+impl Clone for ExponentialBucket {
+    fn clone(&self) -> Self {
+        Self {
+            offset: self.offset,
+            counts: self.counts.clone(),
+        }
+    }
+}
+
 /// A measurement sampled from a time series providing a typical example.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Exemplar<T> {
     /// The attributes recorded with the measurement but filtered out of the
     /// time series' aggregated data.
@@ -297,5 +326,83 @@ impl<T: Copy> Clone for Exemplar<T> {
             span_id: self.span_id,
             trace_id: self.trace_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use super::{DataPoint, Exemplar, ExponentialHistogramDataPoint, HistogramDataPoint};
+
+    use opentelemetry::KeyValue;
+
+    #[test]
+    fn validate_cloning_data_points() {
+        let data_type = DataPoint {
+            attributes: vec![KeyValue::new("key", "value")],
+            start_time: Some(std::time::SystemTime::now()),
+            time: Some(std::time::SystemTime::now()),
+            value: 0u32,
+            exemplars: vec![Exemplar {
+                filtered_attributes: vec![],
+                time: std::time::SystemTime::now(),
+                value: 0u32,
+                span_id: [0; 8],
+                trace_id: [0; 16],
+            }],
+        };
+        assert_eq!(data_type.clone(), data_type);
+
+        let histogram_data_point = HistogramDataPoint {
+            attributes: vec![KeyValue::new("key", "value")],
+            start_time: std::time::SystemTime::now(),
+            time: std::time::SystemTime::now(),
+            count: 0,
+            bounds: vec![],
+            bucket_counts: vec![],
+            min: None,
+            max: None,
+            sum: 0u32,
+            exemplars: vec![Exemplar {
+                filtered_attributes: vec![],
+                time: std::time::SystemTime::now(),
+                value: 0u32,
+                span_id: [0; 8],
+                trace_id: [0; 16],
+            }],
+        };
+        assert_eq!(histogram_data_point.clone(), histogram_data_point);
+
+        let exponential_histogram_data_point = ExponentialHistogramDataPoint {
+            attributes: vec![KeyValue::new("key", "value")],
+            start_time: std::time::SystemTime::now(),
+            time: std::time::SystemTime::now(),
+            count: 0,
+            min: None,
+            max: None,
+            sum: 0u32,
+            scale: 0,
+            zero_count: 0,
+            positive_bucket: super::ExponentialBucket {
+                offset: 0,
+                counts: vec![],
+            },
+            negative_bucket: super::ExponentialBucket {
+                offset: 0,
+                counts: vec![],
+            },
+            zero_threshold: 0.0,
+            exemplars: vec![Exemplar {
+                filtered_attributes: vec![],
+                time: std::time::SystemTime::now(),
+                value: 0u32,
+                span_id: [0; 8],
+                trace_id: [0; 16],
+            }],
+        };
+        assert_eq!(
+            exponential_histogram_data_point.clone(),
+            exponential_histogram_data_point
+        );
     }
 }

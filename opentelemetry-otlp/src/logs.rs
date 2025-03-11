@@ -5,21 +5,17 @@
 #[cfg(feature = "grpc-tonic")]
 use crate::exporter::tonic::TonicExporterBuilder;
 
-#[cfg(feature = "grpc-sys")]
-use crate::exporter::grpcio::GrpcioExporterBuilder;
-
 #[cfg(feature = "http-proto")]
 use crate::exporter::http::HttpExporterBuilder;
 
 use crate::{NoExporterConfig, OtlpPipeline};
 use async_trait::async_trait;
-use std::{borrow::Cow, fmt::Debug};
+use std::fmt::Debug;
 
-use opentelemetry::{
-    global,
-    logs::{LogError, LoggerProvider},
-};
-use opentelemetry_sdk::{self, export::logs::LogData, logs::BatchMessage, runtime::RuntimeChannel};
+use opentelemetry::logs::{LogError, LogResult};
+
+use opentelemetry_sdk::export::logs::LogBatch;
+use opentelemetry_sdk::{runtime::RuntimeChannel, Resource};
 
 /// Compression algorithm to use, defaults to none.
 pub const OTEL_EXPORTER_OTLP_LOGS_COMPRESSION: &str = "OTEL_EXPORTER_OTLP_LOGS_COMPRESSION";
@@ -40,8 +36,9 @@ impl OtlpPipeline {
     /// Create a OTLP logging pipeline.
     pub fn logging(self) -> OtlpLogPipeline<NoExporterConfig> {
         OtlpLogPipeline {
-            log_config: None,
+            resource: None,
             exporter_builder: NoExporterConfig(()),
+            batch_config: None,
         }
     }
 }
@@ -54,9 +51,6 @@ pub enum LogExporterBuilder {
     /// Tonic log exporter builder
     #[cfg(feature = "grpc-tonic")]
     Tonic(TonicExporterBuilder),
-    /// Grpc log exporter builder
-    #[cfg(feature = "grpc-sys")]
-    Grpcio(GrpcioExporterBuilder),
     /// Http log exporter builder
     #[cfg(feature = "http-proto")]
     Http(HttpExporterBuilder),
@@ -68,8 +62,6 @@ impl LogExporterBuilder {
         match self {
             #[cfg(feature = "grpc-tonic")]
             LogExporterBuilder::Tonic(builder) => builder.build_log_exporter(),
-            #[cfg(feature = "grpc-sys")]
-            LogExporterBuilder::Grpcio(builder) => builder.build_log_exporter(),
             #[cfg(feature = "http-proto")]
             LogExporterBuilder::Http(builder) => builder.build_log_exporter(),
         }
@@ -80,13 +72,6 @@ impl LogExporterBuilder {
 impl From<TonicExporterBuilder> for LogExporterBuilder {
     fn from(exporter: TonicExporterBuilder) -> Self {
         LogExporterBuilder::Tonic(exporter)
-    }
-}
-
-#[cfg(feature = "grpc-sys")]
-impl From<GrpcioExporterBuilder> for LogExporterBuilder {
-    fn from(exporter: GrpcioExporterBuilder) -> Self {
-        LogExporterBuilder::Grpcio(exporter)
     }
 }
 
@@ -114,8 +99,12 @@ impl LogExporter {
 
 #[async_trait]
 impl opentelemetry_sdk::export::logs::LogExporter for LogExporter {
-    async fn export(&mut self, batch: Vec<LogData>) -> opentelemetry::logs::LogResult<()> {
+    async fn export(&mut self, batch: LogBatch<'_>) -> LogResult<()> {
         self.client.export(batch).await
+    }
+
+    fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
+        self.client.set_resource(resource);
     }
 }
 
@@ -123,13 +112,22 @@ impl opentelemetry_sdk::export::logs::LogExporter for LogExporter {
 #[derive(Debug)]
 pub struct OtlpLogPipeline<EB> {
     exporter_builder: EB,
-    log_config: Option<opentelemetry_sdk::logs::Config>,
+    resource: Option<Resource>,
+    batch_config: Option<opentelemetry_sdk::logs::BatchConfig>,
 }
 
 impl<EB> OtlpLogPipeline<EB> {
-    /// Set the log provider configuration.
-    pub fn with_log_config(mut self, log_config: opentelemetry_sdk::logs::Config) -> Self {
-        self.log_config = Some(log_config);
+    /// Set the Resource associated with log provider.
+    pub fn with_resource(self, resource: Resource) -> Self {
+        OtlpLogPipeline {
+            resource: Some(resource),
+            ..self
+        }
+    }
+
+    /// Set the batch log processor configuration, and it will override the env vars.
+    pub fn with_batch_config(mut self, batch_config: opentelemetry_sdk::logs::BatchConfig) -> Self {
+        self.batch_config = Some(batch_config);
         self
     }
 }
@@ -142,7 +140,8 @@ impl OtlpLogPipeline<NoExporterConfig> {
     ) -> OtlpLogPipeline<LogExporterBuilder> {
         OtlpLogPipeline {
             exporter_builder: pipeline.into(),
-            log_config: self.log_config,
+            resource: self.resource,
+            batch_config: self.batch_config,
         }
     }
 }
@@ -150,71 +149,64 @@ impl OtlpLogPipeline<NoExporterConfig> {
 impl OtlpLogPipeline<LogExporterBuilder> {
     /// Install the configured log exporter.
     ///
-    /// Returns a [`Logger`] with the name `opentelemetry-otlp` and the current crate version.
+    /// Returns a [`LoggerProvider`].
     ///
-    /// [`Logger`]: opentelemetry_sdk::logs::Logger
-    pub fn install_simple(self) -> Result<opentelemetry_sdk::logs::Logger, LogError> {
+    /// [`LoggerProvider`]: opentelemetry_sdk::logs::LoggerProvider
+    pub fn install_simple(self) -> Result<opentelemetry_sdk::logs::LoggerProvider, LogError> {
         Ok(build_simple_with_exporter(
             self.exporter_builder.build_log_exporter()?,
-            self.log_config,
+            self.resource,
         ))
     }
 
-    /// Install the configured log exporter and a batch span processor using the
+    /// Install the configured log exporter and a batch log processor using the
     /// specified runtime.
     ///
-    /// Returns a [`Logger`] with the name `opentelemetry-otlp` and the current crate version.
+    /// Returns a [`LoggerProvider`].
     ///
-    /// [`Logger`]: opentelemetry_sdk::logs::Logger
-    pub fn install_batch<R: RuntimeChannel<BatchMessage>>(
+    /// [`LoggerProvider`]: opentelemetry_sdk::logs::LoggerProvider
+    pub fn install_batch<R: RuntimeChannel>(
         self,
         runtime: R,
-    ) -> Result<opentelemetry_sdk::logs::Logger, LogError> {
+    ) -> Result<opentelemetry_sdk::logs::LoggerProvider, LogError> {
         Ok(build_batch_with_exporter(
             self.exporter_builder.build_log_exporter()?,
-            self.log_config,
+            self.resource,
             runtime,
+            self.batch_config,
         ))
     }
 }
 
 fn build_simple_with_exporter(
     exporter: LogExporter,
-    log_config: Option<opentelemetry_sdk::logs::Config>,
-) -> opentelemetry_sdk::logs::Logger {
+    resource: Option<Resource>,
+) -> opentelemetry_sdk::logs::LoggerProvider {
     let mut provider_builder =
         opentelemetry_sdk::logs::LoggerProvider::builder().with_simple_exporter(exporter);
-    if let Some(config) = log_config {
-        provider_builder = provider_builder.with_config(config);
+    if let Some(resource) = resource {
+        provider_builder = provider_builder.with_resource(resource);
     }
-    let provider = provider_builder.build();
-    let logger = provider.versioned_logger(
-        Cow::Borrowed("opentelemetry-otlp"),
-        Some(Cow::Borrowed(env!("CARGO_PKG_VERSION"))),
-        None,
-        None,
-    );
-    let _ = global::set_logger_provider(provider);
-    logger
+    // logger would be created in the appenders like
+    // opentelemetry-appender-tracing, opentelemetry-appender-log etc.
+    provider_builder.build()
 }
 
-fn build_batch_with_exporter<R: RuntimeChannel<BatchMessage>>(
+fn build_batch_with_exporter<R: RuntimeChannel>(
     exporter: LogExporter,
-    log_config: Option<opentelemetry_sdk::logs::Config>,
+    resource: Option<Resource>,
     runtime: R,
-) -> opentelemetry_sdk::logs::Logger {
-    let mut provider_builder =
-        opentelemetry_sdk::logs::LoggerProvider::builder().with_batch_exporter(exporter, runtime);
-    if let Some(config) = log_config {
-        provider_builder = provider_builder.with_config(config);
+    batch_config: Option<opentelemetry_sdk::logs::BatchConfig>,
+) -> opentelemetry_sdk::logs::LoggerProvider {
+    let mut provider_builder = opentelemetry_sdk::logs::LoggerProvider::builder();
+    let batch_processor = opentelemetry_sdk::logs::BatchLogProcessor::builder(exporter, runtime)
+        .with_batch_config(batch_config.unwrap_or_default())
+        .build();
+    provider_builder = provider_builder.with_log_processor(batch_processor);
+
+    if let Some(resource) = resource {
+        provider_builder = provider_builder.with_resource(resource);
     }
-    let provider = provider_builder.build();
-    let logger = provider.versioned_logger(
-        Cow::Borrowed("opentelemetry-otlp"),
-        Some(Cow::Borrowed(env!("CARGO_PKG_VERSION"))),
-        None,
-        None,
-    );
-    let _ = global::set_logger_provider(provider);
-    logger
+    // logger would be created in the tracing appender
+    provider_builder.build()
 }

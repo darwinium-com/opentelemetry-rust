@@ -1,10 +1,13 @@
 //! An OpenTelemetry exporter for [Prometheus] metrics.
 //!
+//! <div class="warning"> The development of prometheus exporter has halt until the Opentelemetry metrics API and SDK reaches 1.0. Current
+//! implementation is based on Opentelemetry API and SDK 0.23.</div>
+//!
 //! [Prometheus]: https://prometheus.io
 //!
 //! ```
-//! use opentelemetry::{metrics::MeterProvider as _, KeyValue};
-//! use opentelemetry_sdk::metrics::MeterProvider;
+//! use opentelemetry::{metrics::MeterProvider, KeyValue};
+//! use opentelemetry_sdk::metrics::SdkMeterProvider;
 //! use prometheus::{Encoder, TextEncoder};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,8 +20,8 @@
 //!     .with_registry(registry.clone())
 //!     .build()?;
 //!
-//! // set up a meter meter to create instruments
-//! let provider = MeterProvider::builder().with_reader(exporter).build();
+//! // set up a meter to create instruments
+//! let provider = SdkMeterProvider::builder().with_reader(exporter).build();
 //! let meter = provider.meter("my-app");
 //!
 //! // Use two instruments
@@ -27,7 +30,7 @@
 //!     .with_description("Counts things")
 //!     .init();
 //! let histogram = meter
-//!     .i64_histogram("a.histogram")
+//!     .u64_histogram("a.histogram")
 //!     .with_description("Records values")
 //!     .init();
 //!
@@ -132,9 +135,11 @@ const SCOPE_INFO_KEYS: [&str; 2] = ["otel_scope_name", "otel_scope_version"];
 const COUNTER_SUFFIX: &str = "_total";
 
 mod config;
+mod resource_selector;
 mod utils;
 
 pub use config::ExporterBuilder;
+pub use resource_selector::ResourceSelector;
 
 /// Creates a builder to configure a [PrometheusExporter]
 pub fn exporter() -> ExporterBuilder {
@@ -186,8 +191,10 @@ struct Collector {
     without_counter_suffixes: bool,
     disable_scope_info: bool,
     create_target_info_once: OnceCell<MetricFamily>,
+    resource_labels_once: OnceCell<Vec<LabelPair>>,
     namespace: Option<String>,
     inner: Mutex<CollectorInner>,
+    resource_selector: ResourceSelector,
 }
 
 #[derive(Default)]
@@ -299,17 +306,24 @@ impl prometheus::core::Collector for Collector {
             // Resource should be immutable, we don't need to compute again
             create_info_metric(TARGET_INFO_NAME, TARGET_INFO_DESCRIPTION, &metrics.resource)
         });
-        if !self.disable_target_info {
+
+        if !self.disable_target_info && !metrics.resource.is_empty() {
             res.push(target_info.clone())
         }
 
+        let resource_labels = self
+            .resource_labels_once
+            .get_or_init(|| self.resource_selector.select(&metrics.resource));
+
         for scope_metrics in metrics.scope_metrics {
             let scope_labels = if !self.disable_scope_info {
-                let scope_info = inner
-                    .scope_infos
-                    .entry(scope_metrics.scope.clone())
-                    .or_insert_with_key(create_scope_info_metric);
-                res.push(scope_info.clone());
+                if !scope_metrics.scope.attributes.is_empty() {
+                    let scope_info = inner
+                        .scope_infos
+                        .entry(scope_metrics.scope.clone())
+                        .or_insert_with_key(create_scope_info_metric);
+                    res.push(scope_info.clone());
+                }
 
                 let mut labels =
                     Vec::with_capacity(1 + scope_metrics.scope.version.is_some() as usize);
@@ -324,6 +338,9 @@ impl prometheus::core::Collector for Collector {
                     labels.push(l_version);
                 }
 
+                if !resource_labels.is_empty() {
+                    labels.extend(resource_labels.iter().cloned());
+                }
                 labels
             } else {
                 Vec::new()
@@ -440,7 +457,10 @@ fn add_histogram_metric<T: Numeric>(
     // See: https://github.com/tikv/rust-prometheus/issues/393
 
     for dp in &histogram.data_points {
-        let kvs = get_attrs(&mut dp.attributes.iter(), extra);
+        let kvs = get_attrs(
+            &mut dp.attributes.iter().map(|kv| (&kv.key, &kv.value)),
+            extra,
+        );
         let bounds_len = dp.bounds.len();
         let (bucket, _) = dp.bounds.iter().enumerate().fold(
             (Vec::with_capacity(bounds_len), 0),
@@ -486,7 +506,10 @@ fn add_sum_metric<T: Numeric>(
     };
 
     for dp in &sum.data_points {
-        let kvs = get_attrs(&mut dp.attributes.iter(), extra);
+        let kvs = get_attrs(
+            &mut dp.attributes.iter().map(|kv| (&kv.key, &kv.value)),
+            extra,
+        );
 
         let mut pm = prometheus::proto::Metric::default();
         pm.set_label(protobuf::RepeatedField::from_vec(kvs));
@@ -518,7 +541,10 @@ fn add_gauge_metric<T: Numeric>(
     name: Cow<'static, str>,
 ) {
     for dp in &gauge.data_points {
-        let kvs = get_attrs(&mut dp.attributes.iter(), extra);
+        let kvs = get_attrs(
+            &mut dp.attributes.iter().map(|kv| (&kv.key, &kv.value)),
+            extra,
+        );
 
         let mut g = prometheus::proto::Gauge::default();
         g.set_value(dp.value.as_f64());

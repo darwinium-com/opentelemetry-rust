@@ -10,7 +10,7 @@
 
 ## Usage
 
-Open a console, run the following command from the current folder:
+Open a console, run the following command from the current directory:
 
 ```sh
 cargo run --release --bin X
@@ -35,4 +35,12 @@ Throughput: 4,840,200 iterations/sec
 Throughput: 3,905,200 iterations/sec
 Throughput: 4,106,600 iterations/sec
 Throughput: 5,075,400 iterations/sec
+```
+
+## Feature flags
+
+"stats" - Prints memory and CPU usage. Has slight impact on throughput.
+
+```sh
+cargo run --release --bin metrics --features=stats
 ```

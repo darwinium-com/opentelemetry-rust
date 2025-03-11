@@ -23,36 +23,93 @@ pub mod tonic {
     use std::borrow::Cow;
 
     #[cfg(any(feature = "trace", feature = "logs"))]
+    #[derive(Debug, Default)]
+    pub struct ResourceAttributesWithSchema {
+        pub attributes: Attributes,
+        pub schema_url: Option<String>,
+    }
+
+    #[cfg(any(feature = "trace", feature = "logs"))]
+    impl From<&opentelemetry_sdk::Resource> for ResourceAttributesWithSchema {
+        fn from(resource: &opentelemetry_sdk::Resource) -> Self {
+            ResourceAttributesWithSchema {
+                attributes: resource_attributes(resource),
+                schema_url: resource.schema_url().map(ToString::to_string),
+            }
+        }
+    }
+
+    #[cfg(any(feature = "trace", feature = "logs"))]
     use opentelemetry_sdk::Resource;
 
-    impl From<opentelemetry_sdk::InstrumentationLibrary> for InstrumentationScope {
-        fn from(library: opentelemetry_sdk::InstrumentationLibrary) -> Self {
-            InstrumentationScope {
-                name: library.name.into_owned(),
-                version: library.version.map(Cow::into_owned).unwrap_or_default(),
-                attributes: Attributes::from(library.attributes).0,
-                ..Default::default()
+    impl
+        From<(
+            opentelemetry_sdk::InstrumentationLibrary,
+            Option<Cow<'static, str>>,
+        )> for InstrumentationScope
+    {
+        fn from(
+            data: (
+                opentelemetry_sdk::InstrumentationLibrary,
+                Option<Cow<'static, str>>,
+            ),
+        ) -> Self {
+            let (library, target) = data;
+            if let Some(t) = target {
+                InstrumentationScope {
+                    name: t.to_string(),
+                    version: String::new(),
+                    attributes: vec![],
+                    ..Default::default()
+                }
+            } else {
+                InstrumentationScope {
+                    name: library.name.into_owned(),
+                    version: library.version.map(Cow::into_owned).unwrap_or_default(),
+                    attributes: Attributes::from(library.attributes).0,
+                    ..Default::default()
+                }
             }
         }
     }
 
-    impl From<&opentelemetry_sdk::InstrumentationLibrary> for InstrumentationScope {
-        fn from(library: &opentelemetry_sdk::InstrumentationLibrary) -> Self {
-            InstrumentationScope {
-                name: library.name.to_string(),
-                version: library
-                    .version
-                    .as_ref()
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
-                attributes: Attributes::from(library.attributes.clone()).0,
-                ..Default::default()
+    impl
+        From<(
+            &opentelemetry_sdk::InstrumentationLibrary,
+            Option<Cow<'static, str>>,
+        )> for InstrumentationScope
+    {
+        fn from(
+            data: (
+                &opentelemetry_sdk::InstrumentationLibrary,
+                Option<Cow<'static, str>>,
+            ),
+        ) -> Self {
+            let (library, target) = data;
+            if let Some(t) = target {
+                InstrumentationScope {
+                    name: t.to_string(),
+                    version: String::new(),
+                    attributes: vec![],
+                    ..Default::default()
+                }
+            } else {
+                InstrumentationScope {
+                    name: library.name.to_string(),
+                    version: library
+                        .version
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    attributes: Attributes::from(library.attributes.clone()).0,
+                    ..Default::default()
+                }
             }
         }
     }
 
-    /// Wrapper type for Vec<[`KeyValue`](crate::proto::tonic::common::v1::KeyValue)>
-    #[derive(Default)]
+    /// Wrapper type for Vec<`KeyValue`>
+    #[derive(Default, Debug)]
     pub struct Attributes(pub ::std::vec::Vec<crate::proto::tonic::common::v1::KeyValue>);
 
     #[cfg(feature = "trace")]
